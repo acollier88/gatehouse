@@ -12,10 +12,10 @@ request cannot be replayed or swapped onto another.
 
 Early development. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap.
 
-- [ ] Phase 1 — core daemon, wire protocol, policy engine, terminal approvals
-- [ ] Phase 2 — passkey (WebAuthn) approval + Touch ID / Secure Enclave signer
-- [ ] Phase 3 — Claude Code adapter (PreToolUse hook)
-- [ ] Phase 4 — phone approval (WebAuthn PWA + self-hosted relay)
+- [x] Phase 1 — core daemon, wire protocol, policy engine, terminal approvals
+- [x] Phase 2 — passkey (WebAuthn) approval (localhost Touch ID / platform authenticator)
+- [x] Phase 3 — Claude Code adapter (PreToolUse hook)
+- [x] Phase 4 — phone approval (WebAuthn PWA + self-hosted mTLS relay)
 - [ ] Phase 5 — MCP gateway adapter, audit tooling, threat-model docs
 
 ## Design principles
@@ -33,6 +33,7 @@ Early development. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap.
 ## Layout
 
 - `crates/gatehouse-proto` — canonical request format, digests, signature envelopes, wire protocol
-- `crates/gatehoused` — host daemon: policy engine, approval channels, executor, audit log
-- `crates/gate` — client CLI: `gate run -- <cmd>`, `gate ask`, `gate grant`
+- `crates/gatehoused` — host daemon: policy engine, approval channels, executor, audit log, phone relay
+- `crates/gate` — client CLI: `gate run -- <cmd>`, `gate ask`, `gate grant`, `gate hook`
 - `adapters/claude-code` — PreToolUse hook integration
+- [docs/relay.md](docs/relay.md) — phone PWA + mTLS relay setup

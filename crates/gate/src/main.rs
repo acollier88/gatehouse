@@ -90,22 +90,32 @@ async fn main() -> anyhow::Result<ExitCode> {
     }
 }
 
-/// Read the daemon's advertised endpoint and open the approval page.
+/// Prefer the phone relay URL when configured; else the localhost page.
 fn open_approval_page() -> anyhow::Result<ExitCode> {
-    #[derive(serde::Deserialize)]
-    struct HttpInfo {
-        port: u16,
-        token: String,
-    }
-    let path = paths::http_info_path();
-    let text = std::fs::read_to_string(&path).with_context(|| {
-        format!(
-            "cannot read {} — is gatehoused running?",
-            path.display()
-        )
-    })?;
-    let info: HttpInfo = serde_json::from_str(&text)?;
-    let url = format!("http://localhost:{}/?t={}", info.port, info.token);
+    let url = if let Ok(text) = std::fs::read_to_string(paths::relay_config_path()) {
+        #[derive(serde::Deserialize)]
+        struct RelayCfg {
+            origin: String,
+            phone_token: String,
+        }
+        let cfg: RelayCfg = serde_json::from_str(&text)?;
+        format!("{}/?t={}", cfg.origin.trim_end_matches('/'), cfg.phone_token)
+    } else {
+        #[derive(serde::Deserialize)]
+        struct HttpInfo {
+            port: u16,
+            token: String,
+        }
+        let path = paths::http_info_path();
+        let text = std::fs::read_to_string(&path).with_context(|| {
+            format!(
+                "cannot read {} — is gatehoused running? (or run relay-init for phone URL)",
+                path.display()
+            )
+        })?;
+        let info: HttpInfo = serde_json::from_str(&text)?;
+        format!("http://localhost:{}/?t={}", info.port, info.token)
+    };
     println!("approval page: {url}");
     let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     match std::process::Command::new(opener).arg(&url).spawn() {

@@ -11,8 +11,10 @@ export GATEHOUSE_CONFIG_DIR="$tmp/cfg"
 export GATEHOUSE_DATA_DIR="$tmp/data"
 
 daemon_pid=""
+relay_pid=""
 cleanup() {
   [ -n "$daemon_pid" ] && kill "$daemon_pid" 2>/dev/null || true
+  [ -n "$relay_pid" ] && kill "$relay_pid" 2>/dev/null || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -116,6 +118,71 @@ for line in open(sys.argv[1]):
     prev = e["hash"]
 print("audit chain verified:", prev[:16])
 PY
+
+# --- Phase 4: phone relay -------------------------------------------------
+kill "$daemon_pid" 2>/dev/null || true
+wait "$daemon_pid" 2>/dev/null || true
+daemon_pid=""
+rm -f "$GATEHOUSE_RUNTIME_DIR"/*.sock "$GATEHOUSE_RUNTIME_DIR"/http.json
+
+ports="$(python3 - <<'PY'
+import socket
+def free():
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+print(free(), free())
+PY
+)"
+phone_port="${ports%% *}"
+daemon_mtls_port="${ports##* }"
+
+echo "== phase 4: relay-init + mTLS dial-out"
+"$bin/gatehoused" relay-init \
+  --rp-id localhost \
+  --origin "https://localhost:${phone_port}" \
+  --listen "127.0.0.1:${phone_port}" \
+  --daemon-listen "127.0.0.1:${daemon_mtls_port}" \
+  --force >/dev/null
+token="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/relay/config.json"))["phone_token"])')"
+
+"$bin/gatehoused" relay \
+  --listen "127.0.0.1:${phone_port}" \
+  --daemon-listen "127.0.0.1:${daemon_mtls_port}" \
+  >"$tmp/relay.log" 2>&1 &
+relay_pid=$!
+
+"$bin/gatehoused" --no-open --approval-timeout-secs 3 \
+  --relay-url "https://localhost:${daemon_mtls_port}" \
+  >"$tmp/daemon-relay.log" 2>&1 &
+daemon_pid=$!
+
+for _ in $(seq 80); do
+  if [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] \
+    && curl -skf -H "X-Gatehouse-Token: $token" \
+         "https://localhost:${phone_port}/api/pending" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+curl -skf -H "X-Gatehouse-Token: $token" \
+  "https://localhost:${phone_port}/api/pending" >/dev/null \
+  || fail "relay/daemon not ready: $(tail -n 20 "$tmp/relay.log" "$tmp/daemon-relay.log")"
+
+echo "== phase 4: forged approval without WebAuthn assertion is rejected"
+code="$(curl -sk -o /dev/null -w '%{http_code}' \
+  -H "X-Gatehouse-Token: $token" -H 'Content-Type: application/json' \
+  -d '{"approved":true,"digest":"deadbeef"}' \
+  "https://localhost:${phone_port}/api/approve/finish")"
+[ "$code" = "401" ] || fail "forged finish should be 401, got $code"
+
+echo "== phase 4: killing relay mid-approval denies on timeout"
+(
+  sleep 0.2
+  kill "$relay_pid" 2>/dev/null || true
+  relay_pid=""
+) &
+if "$bin/gate" run -- git push origin main >/dev/null 2>&1; then
+  fail "git push should deny when relay dies before approval"
+fi
 
 echo
 echo "ALL E2E TESTS PASSED"

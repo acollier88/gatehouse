@@ -61,3 +61,17 @@ pub fn passkeys_path() -> PathBuf {
 pub fn http_info_path() -> PathBuf {
     agent_sock().parent().unwrap().join("http.json")
 }
+
+/// Directory holding relay CA/certs and `config.json`.
+pub fn relay_dir() -> PathBuf {
+    data_dir().join("relay")
+}
+
+pub fn relay_config_path() -> PathBuf {
+    relay_dir().join("config.json")
+}
+
+/// Passkeys enrolled against the phone/relay relying-party id.
+pub fn phone_passkeys_path() -> PathBuf {
+    data_dir().join("passkeys-phone.json")
+}

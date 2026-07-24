@@ -61,6 +61,12 @@ const enc = b => btoa(String.fromCharCode(...new Uint8Array(b)))
 async function refresh() {
   try {
     const data = await api('/api/pending');
+    if (navigator.serviceWorker?.controller && data.entries?.length) {
+      const e = data.entries[0];
+      navigator.serviceWorker.controller.postMessage({
+        type: 'pending', digest: e.digest, summary: e.summary,
+      });
+    }
     const box = document.getElementById('pending');
     document.getElementById('enroll-info').textContent =
       data.enrolled + ' passkey(s) enrolled. ';
@@ -142,6 +148,9 @@ async function deny(digest) {
 }
 
 document.getElementById('enroll-btn').onclick = enroll;
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.register('/sw.js').catch(() => {});
+}
 refresh();
 setInterval(refresh, 2000);
 </script>

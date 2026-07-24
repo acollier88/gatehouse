@@ -27,7 +27,15 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 tracing = "0.1"
 tracing-subscriber = "0.3"
-axum = "0.8"
+axum = { version = "0.8", features = ["ws"] }
+axum-server = { version = "0.7", features = ["tls-rustls"] }
 webauthn-rs = "0.5"
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
+rcgen = "0.13"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12", "logging"] }
+rustls-pemfile = "2"
+tokio-rustls = "0.26"
+tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
+futures-util = "0.3"
+webpki-roots = "0.26"
