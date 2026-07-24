@@ -14,3 +14,4 @@ anyhow.workspace = true
 clap.workspace = true
 base64.workspace = true
 rand.workspace = true
+shell-words = "1"

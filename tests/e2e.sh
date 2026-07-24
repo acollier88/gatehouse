@@ -77,6 +77,28 @@ echo "== session grant auto-allows"
 "$bin/gate" grant "true" --for 60s >/dev/null
 "$bin/gate" run -- true || fail "granted command should run without approval"
 
+echo "== claude-code hook: allow tier"
+hookin() { printf '{"session_id":"e2e","cwd":"%s","tool_name":"%s","tool_input":%s}' "$tmp" "$1" "$2"; }
+out="$(hookin Bash '{"command":"ls -la"}' | "$bin/gate" hook claude-code)"
+echo "$out" | grep -q '"permissionDecision":"allow"' || fail "hook should allow ls, got: $out"
+
+echo "== claude-code hook: deny tier"
+out="$(hookin Bash '{"command":"sudo rm -rf /"}' | "$bin/gate" hook claude-code)"
+echo "$out" | grep -q '"permissionDecision":"deny"' || fail "hook should deny sudo, got: $out"
+
+echo "== claude-code hook: non-workspace file write asks, ctl denial maps to deny"
+# /etc/hosts is outside any workspace prefix -> ask tier; the hook blocks
+# until the operator decides, so deny it from the ctl side.
+(
+  for _ in $(seq 50); do
+    d="$("$bin/gate" pending | grep '/etc/hosts' | head -1 | sed 's/^\[\([0-9a-f]*\)\].*/\1/')"
+    if [ -n "$d" ]; then "$bin/gate" deny "$d" >/dev/null; exit 0; fi
+    sleep 0.1
+  done
+) &
+out="$(hookin Write '{"file_path":"/etc/hosts"}' | "$bin/gate" hook claude-code)"
+echo "$out" | grep -q '"permissionDecision":"deny"' || fail "denied file write should map to deny, got: $out"
+
 echo "== status reports"
 "$bin/gate" status | grep -q "gatehoused up" || fail "status output missing"
 

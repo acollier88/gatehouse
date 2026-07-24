@@ -1,3 +1,5 @@
+mod hook;
+
 use std::io::Write as _;
 use std::process::ExitCode;
 
@@ -58,6 +60,9 @@ enum Cmd {
     Enroll,
     /// Open the approval page to act on pending requests.
     Approvals,
+    /// Harness hook adapters (reads hook JSON on stdin). Currently:
+    /// `gate hook claude-code` for Claude Code PreToolUse.
+    Hook { adapter: String },
 }
 
 #[tokio::main]
@@ -75,6 +80,13 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         Cmd::Status => ctl(CtlMsg::Status).await,
         Cmd::Enroll | Cmd::Approvals => open_approval_page(),
+        Cmd::Hook { adapter } => match adapter.as_str() {
+            "claude-code" => hook::run_claude_code().await,
+            other => {
+                eprintln!("unknown hook adapter: {other} (supported: claude-code)");
+                Ok(ExitCode::FAILURE)
+            }
+        },
     }
 }
 
