@@ -50,3 +50,14 @@ pub fn data_dir() -> PathBuf {
 pub fn audit_path() -> PathBuf {
     data_dir().join("audit.jsonl")
 }
+
+/// Enrolled passkeys (webauthn-rs `Passkey` list, JSON).
+pub fn passkeys_path() -> PathBuf {
+    data_dir().join("passkeys.json")
+}
+
+/// Where the daemon advertises its approval-page endpoint: `{port, token}`.
+/// Lives in the runtime dir (0600) so only the operator's user can read it.
+pub fn http_info_path() -> PathBuf {
+    agent_sock().parent().unwrap().join("http.json")
+}

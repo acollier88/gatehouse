@@ -67,6 +67,25 @@ fn handle(ctx: &Arc<Ctx>, msg: CtlMsg, started: Instant) -> CtlResp {
 }
 
 fn decide(ctx: &Arc<Ctx>, digest_prefix: &str, approve: bool) -> CtlResp {
+    // With a passkey enrolled, ask-strong approvals must come from the
+    // authenticator, not an unattested ctl command — otherwise anything that
+    // can reach the ctl socket silently downgrades the strong tier. Denials
+    // stay allowed from anywhere.
+    if approve {
+        let pending = ctx.state.pending.lock().unwrap();
+        let is_strong = pending
+            .iter()
+            .any(|(d, p)| d.starts_with(digest_prefix) && p.tier == gatehouse_proto::Tier::AskStrong);
+        if is_strong && ctx.passkeys_enrolled() {
+            let url = ctx.approval_url().unwrap_or_else(|| "page not up".into());
+            return CtlResp::Error {
+                message: format!(
+                    "this request is ask-strong and a passkey is enrolled; \
+                     approve it with your passkey: {url}"
+                ),
+            };
+        }
+    }
     match ctx.state.take_pending(digest_prefix) {
         Ok((digest, pending)) => {
             let summary = pending.request.summary();

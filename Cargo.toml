@@ -27,3 +27,7 @@ chrono = { version = "0.4", features = ["serde"] }
 dirs = "5"
 tracing = "0.1"
 tracing-subscriber = "0.3"
+axum = "0.8"
+webauthn-rs = "0.5"
+uuid = { version = "1", features = ["v4", "serde"] }
+url = "2"

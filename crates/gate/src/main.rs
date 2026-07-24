@@ -54,6 +54,10 @@ enum Cmd {
     },
     /// Show daemon status.
     Status,
+    /// Open the approval page to enroll a passkey (Touch ID on macOS).
+    Enroll,
+    /// Open the approval page to act on pending requests.
+    Approvals,
 }
 
 #[tokio::main]
@@ -70,7 +74,33 @@ async fn main() -> anyhow::Result<ExitCode> {
             ctl(CtlMsg::Grant { argv_glob, ttl_secs }).await
         }
         Cmd::Status => ctl(CtlMsg::Status).await,
+        Cmd::Enroll | Cmd::Approvals => open_approval_page(),
     }
+}
+
+/// Read the daemon's advertised endpoint and open the approval page.
+fn open_approval_page() -> anyhow::Result<ExitCode> {
+    #[derive(serde::Deserialize)]
+    struct HttpInfo {
+        port: u16,
+        token: String,
+    }
+    let path = paths::http_info_path();
+    let text = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "cannot read {} — is gatehoused running?",
+            path.display()
+        )
+    })?;
+    let info: HttpInfo = serde_json::from_str(&text)?;
+    let url = format!("http://localhost:{}/?t={}", info.port, info.token);
+    println!("approval page: {url}");
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    match std::process::Command::new(opener).arg(&url).spawn() {
+        Ok(_) => {}
+        Err(e) => eprintln!("could not launch browser ({e}); open the URL manually"),
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 fn session_id() -> String {

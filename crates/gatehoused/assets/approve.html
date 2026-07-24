@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Gatehouse — approvals</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { font-family: ui-sans-serif, system-ui, -apple-system, sans-serif;
+         max-width: 640px; margin: 2rem auto; padding: 0 1rem; }
+  h1 { font-size: 1.3rem; } h1 small { font-weight: normal; opacity: .6; }
+  .card { border: 1px solid rgba(128,128,128,.35); border-radius: 10px;
+          padding: .8rem 1rem; margin: .6rem 0; }
+  .summary { font-family: ui-monospace, monospace; font-size: .95rem;
+             word-break: break-all; }
+  .meta { font-size: .8rem; opacity: .65; margin-top: .25rem; }
+  .tier-ask_strong { border-left: 4px solid #d97706; }
+  .tier-ask { border-left: 4px solid #6b7280; }
+  button { font: inherit; padding: .4rem .9rem; border-radius: 8px;
+           border: 1px solid rgba(128,128,128,.5); cursor: pointer;
+           background: transparent; margin-right: .5rem; margin-top: .5rem; }
+  button.approve { background: #16a34a; border-color: #16a34a; color: white; }
+  button.deny { color: #dc2626; border-color: #dc2626; }
+  #status { min-height: 1.2em; font-size: .85rem; opacity: .8; margin: .5rem 0; }
+  #enroll-box { margin-top: 2rem; padding-top: 1rem;
+                border-top: 1px solid rgba(128,128,128,.3); font-size: .9rem; }
+</style>
+</head>
+<body>
+<h1>Gatehouse <small>approval console</small></h1>
+<div id="status"></div>
+<div id="pending"></div>
+<div id="enroll-box">
+  <span id="enroll-info"></span>
+  <button id="enroll-btn">Enroll a passkey</button>
+</div>
+<script>
+const token = new URLSearchParams(location.search).get('t');
+const statusEl = document.getElementById('status');
+
+function say(msg, isErr) {
+  statusEl.textContent = msg;
+  statusEl.style.color = isErr ? '#dc2626' : '';
+}
+
+async function api(path, body) {
+  const r = await fetch(path, {
+    method: body === undefined ? 'GET' : 'POST',
+    headers: { 'X-Gatehouse-Token': token, 'Content-Type': 'application/json' },
+    body: body === undefined ? undefined : JSON.stringify(body),
+  });
+  if (!r.ok) throw new Error(path + ' -> HTTP ' + r.status);
+  return r.json();
+}
+
+// base64url <-> ArrayBuffer, the eternal WebAuthn chore.
+const dec = s => Uint8Array.from(atob(s.replace(/-/g, '+').replace(/_/g, '/')), c => c.charCodeAt(0));
+const enc = b => btoa(String.fromCharCode(...new Uint8Array(b)))
+  .replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+
+async function refresh() {
+  try {
+    const data = await api('/api/pending');
+    const box = document.getElementById('pending');
+    document.getElementById('enroll-info').textContent =
+      data.enrolled + ' passkey(s) enrolled. ';
+    if (!data.entries.length) {
+      box.innerHTML = '<p style="opacity:.6">No pending requests.</p>';
+      return;
+    }
+    box.innerHTML = '';
+    for (const e of data.entries) {
+      const card = document.createElement('div');
+      card.className = 'card tier-' + e.tier;
+      card.innerHTML =
+        '<div class="summary"></div>' +
+        '<div class="meta">' + e.tier + ' · ' + e.harness + ' · ' +
+        e.age_secs + 's ago · ' + e.digest.slice(0, 8) + '</div>';
+      card.querySelector('.summary').textContent = e.summary;
+      const ok = document.createElement('button');
+      ok.className = 'approve';
+      ok.textContent = 'Approve with passkey';
+      ok.onclick = () => approve(e.digest);
+      const no = document.createElement('button');
+      no.className = 'deny';
+      no.textContent = 'Deny';
+      no.onclick = () => deny(e.digest);
+      card.append(ok, no);
+      box.append(card);
+    }
+  } catch (err) {
+    say('Cannot reach daemon: ' + err.message, true);
+  }
+}
+
+async function enroll() {
+  try {
+    say('Follow the browser prompt…');
+    const { id, options } = await api('/api/register/start', {});
+    const pk = options.publicKey;
+    pk.challenge = dec(pk.challenge);
+    pk.user.id = dec(pk.user.id);
+    (pk.excludeCredentials || []).forEach(c => c.id = dec(c.id));
+    const cred = await navigator.credentials.create({ publicKey: pk });
+    await api('/api/register/finish', { id, cred: {
+      id: cred.id, rawId: enc(cred.rawId), type: cred.type, extensions: {},
+      response: {
+        attestationObject: enc(cred.response.attestationObject),
+        clientDataJSON: enc(cred.response.clientDataJSON),
+      },
+    }});
+    say('Passkey enrolled.');
+    refresh();
+  } catch (err) { say('Enrollment failed: ' + err.message, true); }
+}
+
+async function approve(digest) {
+  try {
+    say('Confirm with your authenticator…');
+    const { id, options } = await api('/api/approve/start', { digest });
+    const pk = options.publicKey;
+    pk.challenge = dec(pk.challenge);
+    (pk.allowCredentials || []).forEach(c => c.id = dec(c.id));
+    const cred = await navigator.credentials.get({ publicKey: pk });
+    await api('/api/approve/finish', { id, cred: {
+      id: cred.id, rawId: enc(cred.rawId), type: cred.type, extensions: {},
+      response: {
+        authenticatorData: enc(cred.response.authenticatorData),
+        clientDataJSON: enc(cred.response.clientDataJSON),
+        signature: enc(cred.response.signature),
+        userHandle: cred.response.userHandle ? enc(cred.response.userHandle) : null,
+      },
+    }});
+    say('Approved.');
+    refresh();
+  } catch (err) { say('Approval failed: ' + err.message, true); refresh(); }
+}
+
+async function deny(digest) {
+  try { await api('/api/deny', { digest }); say('Denied.'); refresh(); }
+  catch (err) { say('Deny failed: ' + err.message, true); }
+}
+
+document.getElementById('enroll-btn').onclick = enroll;
+refresh();
+setInterval(refresh, 2000);
+</script>
+</body>
+</html>

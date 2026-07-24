@@ -134,37 +134,52 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
             ctx.audit(&digest, &summary, tier, "pending", &rule);
             send(w, &decision(DecisionStatus::Pending)).await;
             let short = &digest[..8];
-            warn!("APPROVAL NEEDED [{short}] {summary} — run: gate approve {short}");
-            if tier == Tier::AskStrong {
-                warn!(
-                    "[{short}] tier is ask-strong but no signer is enrolled (phase 1); \
-                     operator approval will be recorded as unattested"
-                );
+            if tier == Tier::AskStrong && ctx.passkeys_enrolled() {
+                if let Some(url) = ctx.approval_url() {
+                    warn!("APPROVAL NEEDED [{short}] {summary} — passkey required: {url}");
+                    if ctx.auto_open {
+                        open_browser(&url);
+                    }
+                } else {
+                    warn!("APPROVAL NEEDED [{short}] {summary} — approval page not up yet");
+                }
+            } else {
+                warn!("APPROVAL NEEDED [{short}] {summary} — run: gate approve {short}");
+                if tier == Tier::AskStrong {
+                    warn!(
+                        "[{short}] tier is ask-strong but no passkey is enrolled; \
+                         operator approval will be recorded as unattested \
+                         (run `gate enroll` to fix)"
+                    );
+                }
             }
 
-            let approved = match tokio::time::timeout(ctx.approval_timeout, rx).await {
+            let approval = match tokio::time::timeout(ctx.approval_timeout, rx).await {
                 Ok(Ok(Some(envelope))) => {
                     // Bind the approval to this exact request before release.
                     let structurally_ok = envelope.check(&digest, now_unix()).is_ok();
                     let nonce_ok = envelope.nonce == nonce;
                     if !structurally_ok || !nonce_ok {
                         warn!("[{short}] approval envelope rejected (binding/expiry)");
+                        None
+                    } else {
+                        Some(envelope)
                     }
-                    structurally_ok && nonce_ok
                 }
-                Ok(Ok(None)) => false,
+                Ok(Ok(None)) => None,
                 // Sender dropped (daemon-side denial path) or timeout.
-                Ok(Err(_)) => false,
+                Ok(Err(_)) => None,
                 Err(_) => {
                     ctx.state.pending.lock().unwrap().remove(&digest);
                     warn!("[{short}] approval timed out; denying");
-                    false
+                    None
                 }
             };
 
-            if approved {
-                info!("approved [{short}] {summary}");
-                ctx.audit(&digest, &summary, tier, "approved", "operator");
+            if let Some(envelope) = approval {
+                let via = format!("{:?}:{}", envelope.scheme, envelope.key_id);
+                info!("approved [{short}] {summary} via {via}");
+                ctx.audit(&digest, &summary, tier, "approved", &via);
                 send(w, &decision(DecisionStatus::Allowed)).await;
                 if execute {
                     run_child(w, &request).await;
@@ -257,6 +272,17 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(reader: &mut R, w: &Writer, is_er
                 send(w, &msg).await;
             }
         }
+    }
+}
+
+fn open_browser(url: &str) {
+    #[cfg(target_os = "macos")]
+    {
+        let _ = std::process::Command::new("open").arg(url).spawn();
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }
 }
 
