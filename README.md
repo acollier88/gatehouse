@@ -18,7 +18,7 @@ Early development. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap.
 - [x] Phase 4 — phone approval (WebAuthn PWA + self-hosted mTLS relay)
 - [ ] Phase 5 — MCP gateway adapter, audit tooling, threat-model docs
 - [ ] Phase 6 — hosted / integrator relay (stable phone RP without Tailscale)
-- [ ] Phase 7 — more harness adapters (Cursor, Codex, OpenCode, Pi, …)
+- [ ] Phase 7 — more harness adapters (Codex + OpenCode shipped; Cursor docs)
 - [ ] Phase 8 — Windows + Linux support for `gatehoused` / `gate`
 - [ ] Phase 9 — dedicated approval app (research; passkeys + push, not OTP)
 
@@ -96,11 +96,10 @@ Open the printed phone URL **in the phone’s browser**, enroll, then
 Details: [docs/relay.md](docs/relay.md). Future integrator-hosted endpoints
 (no Tailscale for end users): [docs/hosted-relay.md](docs/hosted-relay.md).
 
-### 3. Claude Code hook (advisory)
+### 3. Harness hooks (advisory)
 
-Routes harness tool calls through the broker. This is UX, not the security
-boundary — combine with sandbox / `gate run` for enforcement.
-See [adapters/claude-code/README.md](adapters/claude-code/README.md).
+Routes harness tool calls through the broker. UX, not the security boundary —
+combine with sandbox / `gate run` for enforcement. See [adapters/](adapters/).
 
 ## Why “scan QR on phone” fails for localhost enroll
 

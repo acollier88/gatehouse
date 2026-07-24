@@ -88,6 +88,18 @@ echo "== claude-code hook: deny tier"
 out="$(hookin Bash '{"command":"sudo rm -rf /"}' | "$bin/gate" hook claude-code)"
 echo "$out" | grep -q '"permissionDecision":"deny"' || fail "hook should deny sudo, got: $out"
 
+echo "== codex hook: deny exits 2"
+set +e
+hookin shell '{"command":"sudo rm -rf /"}' | "$bin/gate" hook codex >/dev/null 2>"$tmp/codex.err"
+code=$?
+set -e
+[ "$code" = "2" ] || fail "codex deny should exit 2, got $code"
+grep -q 'gatehouse denied' "$tmp/codex.err" || fail "codex deny missing reason"
+
+echo "== generic hook: allow JSON"
+out="$(printf '{"harness":"opencode","cwd":"%s","command":"ls"}' "$tmp" | "$bin/gate" hook generic)"
+echo "$out" | grep -q '"decision":"allow"' || fail "generic should allow ls, got: $out"
+
 echo "== claude-code hook: non-workspace file write asks, ctl denial maps to deny"
 # /etc/hosts is outside any workspace prefix -> ask tier; the hook blocks
 # until the operator decides, so deny it from the ctl side.
