@@ -1,0 +1,22 @@
+# Example: agent container with socket-only egress to the host broker.
+#
+# Host: run gatehoused, note the agent socket path.
+# Agent: only the mounted socket is available for side effects — use
+# `gate run` / gate-mcp inside the container.
+#
+#   docker compose run --rm agent
+services:
+  agent:
+    image: rust:1-bookworm
+    working_dir: /work
+    volumes:
+      - ./:/work:ro
+      # Host runtime dir (adjust path / GATEHOUSE_RUNTIME_DIR as needed)
+      - ${GATEHOUSE_RUNTIME_DIR:-${HOME}/.gatehouse/run}:/gatehouse/run:rw
+    environment:
+      GATEHOUSE_RUNTIME_DIR: /gatehouse/run
+    # No network: force all interesting work through the broker socket.
+    network_mode: none
+    command: >
+      bash -lc "cargo install --path crates/gate --root /tmp/gh &&
+      /tmp/gh/bin/gate run -- echo hello-from-container"

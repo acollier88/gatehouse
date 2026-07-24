@@ -101,6 +101,15 @@ echo "== claude-code hook: non-workspace file write asks, ctl denial maps to den
 out="$(hookin Write '{"file_path":"/etc/hosts"}' | "$bin/gate" hook claude-code)"
 echo "$out" | grep -q '"permissionDecision":"deny"' || fail "denied file write should map to deny, got: $out"
 
+echo "== policy test dry-run"
+pt="$("$bin/gate" policy test -- git push origin main)"
+echo "$pt" | grep -q 'tier=ask-strong' \
+  || fail "policy test should resolve git push as ask-strong, got: $pt"
+
+echo "== audit verify"
+av="$("$bin/gate" audit verify)"
+echo "$av" | grep -q 'chain intact' || fail "audit verify failed: $av"
+
 echo "== status reports"
 "$bin/gate" status | grep -q "gatehoused up" || fail "status output missing"
 
