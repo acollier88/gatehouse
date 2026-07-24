@@ -13,18 +13,30 @@ approval.
 ## Bootstrap
 
 ```sh
-# RP ID = hostname phones will see (Tailscale MagicDNS, Funnel hostname, etc.)
-gatehoused relay-init \
-  --rp-id box.tailnet.ts.net \
-  --origin https://box.tailnet.ts.net:8787
+# Interactive: detects Tailscale MagicDNS and asks whether to use it
+gatehoused relay-init
 
-# Material lands in $GATEHOUSE_DATA_DIR/relay/ (certs + config.json, mode 0600).
-# The init log prints the phone URL with the bearer token.
+# Non-interactive Tailscale
+gatehoused relay-init --tailscale --yes
+
+# Explicit custom / future hosted RP
+gatehoused relay-init --rp-id approve.example.com --origin https://approve.example.com
+
+# Re-setup later (updates cert SANs + URLs). Prefer --keep-token if you
+# already bookmarked the phone URL. RP ID change ⇒ re-enroll passkeys.
+gatehoused relay-init --tailscale --force --keep-token
+gatehoused relay-show
 ```
+
+Material lands in `$GATEHOUSE_DATA_DIR/relay/` (certs + `config.json`, mode
+0600), including `transport` (`tailscale` | `custom` | …).
 
 Copy the same `relay/` directory to whichever machine runs the relay if it is
 not the daemon host. The daemon needs the client cert; the relay needs the
 server cert + CA.
+
+Integrator-hosted endpoints (Cursor/Claude/etc. providing the phone RP):
+see [hosted-relay.md](hosted-relay.md).
 
 ## Run
 
@@ -39,9 +51,17 @@ gatehoused --relay-url https://box.tailnet.ts.net:8788
 - **8787** — phone HTTPS (PWA). Auth: `?t=` / `X-Gatehouse-Token`.
 - **8788** — daemon mTLS WebSocket at `/ws`. Client certificate required.
 
-Open the phone URL (or `gate enroll` / `gate approvals` once `relay-init` has
-run). Enroll a passkey on the phone, then trigger an `ask-strong` op
-(`gate run -- git push`).
+Open the phone URL **on the phone** (Safari/Chrome). Enroll a passkey there,
+then trigger an `ask-strong` op (`gate run -- git push`).
+
+`gate enroll` prefers the relay URL once `relay-init` has run; on a phone that
+is correct. On the Mac localhost page, prefer Touch ID — do **not** use the
+browser’s “save passkey on phone via QR” offer for `localhost` RP (platforms
+reject it). See the README “Why scan QR fails” section.
+
+Push (APNs, ntfy, etc.) is optional awareness only. Pending requests are
+polled by the PWA; the approval itself is always a WebAuthn assertion verified
+by the daemon.
 
 ## Threat notes
 

@@ -61,6 +61,39 @@ gatehouse/
 - Generic docs/recipes: OpenCode, Codex CLI, containerized agent with socket-only egress (docker-compose example mounting the UDS).
 - `gate audit verify` (hash-chain check), `gate policy test -- <cmd>` (dry-run tier resolution), README with threat model section (explicitly listing what hook-mode does NOT protect against).
 
+### Phase 6 — Hosted / integrator relay
+- Multi-tenant relay endpoint so integrators (Cursor, Claude, Codex, Pi, …) or enterprises can publish a stable phone RP (`approve.example.com`) without requiring every user to run Tailscale.
+- Daemon config: `endpoint = <integrator | self-hosted URL>`; device enrollment replaces shared CA files for SaaS; ceremonies remain on the user broker (relay still cannot forge approvals).
+- Setup UX already started in Phase 4: `relay-init` asks Tailscale vs custom hostname and supports re-setup with `--force` (RP ID change ⇒ re-enroll passkeys).
+- Spec: [docs/hosted-relay.md](hosted-relay.md).
+
+### Phase 7 — More harness adapters (Claude Code pattern)
+- Ship out-of-tree adapters under `adapters/` the way Phase 3 did for Claude Code: hook / wrapper / MCP client that calls `gate ask` or `gate hook <name>`, with install scripts and an honesty section (advisory vs enforced).
+- Priority targets (exact hook surfaces vary; research per tool):
+  - **Open-ish / scriptable:** OpenCode, Codex CLI, Aider, Continue, Goose, Pi — prefer PRs upstream where the project is OSS and receptive.
+  - **Closed / no upstream PR path:** Cursor Agent, Claude Code (done), ChatGPT/Codex app, proprietary IDE agents — adapters only; document the ceiling (harness must honor the hook or route exec through `gate run`).
+- Shared adapter kit: stdin JSON → `GateRequest` classifiers, timeout/deny defaults, settings merge helpers (generalize `adapters/claude-code/install.sh`).
+- MCP gateway from Phase 5 is the portable escape hatch when a harness has no hook API but can call MCP tools.
+
+### Phase 8 — Windows + Linux hosts for `gatehoused`
+- Goal: broker + CLI + policy + localhost WebAuthn on Windows and Linux; **phone relay may stay Unix-first** initially (mTLS + Funnel/Tailscale recipes are macOS/Linux ops-heavy).
+- Replace Unix-domain sockets with a platform transport: Windows named pipes (or loopback TCP + token) for agent/ctl; keep the same JSON wire protocol.
+- Platform authenticators: Linux (`libfido2` / browser passkey via localhost page — already mostly OK); Windows Hello via the same WebAuthn page (Edge/Chrome).
+- CI matrix: `ubuntu-latest` + `windows-latest` unit/e2e for `gate run` / policy / audit (relay e2e optional/nightly).
+- Docs: path overrides (`GATEHOUSE_*`), service install notes (systemd user unit; Windows service or tray later).
+
+### Phase 9 — Dedicated approval / MFA app (research → spike)
+*Intentionally underbaked — revisit with a clear threat model before committing to a store app.*
+
+Open questions to answer first:
+1. **Is a custom app required?** Today’s path is browser PWA + platform passkey. A native app mainly wins on push reliability, UX, and App Store discovery — not on crypto strength if WebAuthn stays.
+2. **Reuse vs build:** survey OSS “push approval” apps (e.g. authenticator-style, CIBA/demo clients, privacy-preserving push). Prefer **passkeys / OS WebAuthn** over reinventing TOTP/HOTP; do not become another OTP broker.
+3. **Plugin to existing authenticators?** Standard passkeys already use iCloud Keychain / Google Password Manager / 1Password / etc. A Gatehouse app would be for **pending-request UX + push**, with assertion still WebAuthn against the relay RP — not a proprietary soft-token.
+4. **Push shape:** relay/hosted endpoint → APNs/FCM “approval needed” → app opens ceremony or in-app WebAuthn → assertion back to relay → daemon verifies. Push payload must not authorize anything by itself.
+5. **Scope cut:** spike a thin iOS/Android shell that wraps the existing PWA + Web Push before designing a greenfield MFA protocol.
+
+Exit criteria for leaving “research”: written decision (PWA-only vs thin native shell vs full app), push provider choice, and explicit non-goals (no OTP, no relay-trusted approve button).
+
 ## Key implementation notes
 - Rust edition 2024; workspace deps: `tokio`, `serde`/`serde_jcs`, `sha2`, `p256`, `webauthn-rs` (phase 4), `security-framework`/`objc2` (phase 2), `clap`.
 - The Unix socket is the trust boundary: daemon runs as the user (v1); document the future hardening path (separate user / host-side daemon for containerized agents).
@@ -72,3 +105,7 @@ gatehouse/
 - **Phase 2:** manual: `gate enroll` then a `git push` triggers Touch ID with correct summary; test that a tampered request (digest mismatch) is rejected even with a valid signature from another request (replay test in CI using a software P-256 key behind the same signer trait).
 - **Phase 3:** sample repo with hook installed; run Claude Code, ask it to `git push`; confirm hook blocks until Touch ID approval; timeout path denies.
 - **Phase 4:** phone enrolls passkey; kill relay mid-approval → request denied on timeout; forged relay message without valid WebAuthn assertion → rejected.
+- **Phase 6:** two daemons enrolled to one hosted relay cannot approve each other’s requests; relay “approved” without assertion rejected; migrating RP ID forces re-enrollment.
+- **Phase 7:** at least one additional adapter (OSS preferred) green in e2e; closed-tool adapter docs state advisory ceiling; shared classifier helpers used by ≥2 adapters.
+- **Phase 8:** `cargo test` + smoke e2e on Linux and Windows CI without Unix-only APIs in the broker core; sockets/pipes abstracted behind one trait.
+- **Phase 9:** research note checked into `docs/` with go/no-go; if go, spike app that completes one real `ask-strong` via existing relay crypto.

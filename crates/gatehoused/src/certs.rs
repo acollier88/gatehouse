@@ -33,7 +33,15 @@ impl RelayMaterial {
         Ok(Self { config, dir })
     }
 
-    pub fn init(rp_id: &str, origin: &str, listen: &str, daemon_listen: &str, force: bool) -> anyhow::Result<Self> {
+    pub fn init(
+        rp_id: &str,
+        origin: &str,
+        listen: &str,
+        daemon_listen: &str,
+        force: bool,
+        keep_token: Option<String>,
+        transport: Option<String>,
+    ) -> anyhow::Result<Self> {
         let dir = paths::relay_dir();
         std::fs::create_dir_all(&dir)?;
         let cfg_path = paths::relay_config_path();
@@ -82,13 +90,14 @@ impl RelayMaterial {
         write_pem(dir.join(DAEMON_CERT), daemon_cert.pem())?;
         write_pem(dir.join(DAEMON_KEY), daemon_key.serialize_pem())?;
 
-        let phone_token = new_token();
+        let phone_token = keep_token.unwrap_or_else(new_token);
         let config = RelayConfig {
             rp_id: rp_id.to_string(),
             origin: origin.trim_end_matches('/').to_string(),
             phone_token: phone_token.clone(),
             listen: listen.to_string(),
             daemon_listen: daemon_listen.to_string(),
+            transport,
         };
         let cfg_json = serde_json::to_string_pretty(&config)?;
         write_pem(&cfg_path, cfg_json)?;

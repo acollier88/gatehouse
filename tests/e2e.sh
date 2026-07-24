@@ -141,7 +141,7 @@ echo "== phase 4: relay-init + mTLS dial-out"
   --origin "https://localhost:${phone_port}" \
   --listen "127.0.0.1:${phone_port}" \
   --daemon-listen "127.0.0.1:${daemon_mtls_port}" \
-  --force >/dev/null
+  --force --yes >/dev/null
 token="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/relay/config.json"))["phone_token"])')"
 
 "$bin/gatehoused" relay \

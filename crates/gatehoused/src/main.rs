@@ -6,6 +6,7 @@ mod policy;
 mod relay;
 mod relay_client;
 mod server;
+mod setup;
 mod state;
 mod web;
 
@@ -46,23 +47,43 @@ struct Args {
 #[derive(Subcommand)]
 enum Cmd {
     /// Generate mTLS certs + phone token for the approval relay.
+    ///
+    /// Interactive when run in a TTY with no host flags: detects Tailscale
+    /// and asks whether to use it. Re-run with `--force` to change URLs later.
     RelayInit {
-        /// WebAuthn RP ID (usually the hostname phones will see).
+        /// WebAuthn RP ID (hostname phones will see).
         #[arg(long)]
-        rp_id: String,
+        rp_id: Option<String>,
         /// Public origin phones use, e.g. https://box.tailnet.ts.net:8787
         #[arg(long)]
-        origin: String,
-        /// Phone HTTPS listen address stored in config (default 0.0.0.0:8787).
+        origin: Option<String>,
+        /// Auto-fill rp_id/origin from `tailscale status` MagicDNS name.
+        #[arg(long)]
+        tailscale: bool,
+        /// Port embedded in the generated https:// origin (default 8787).
+        #[arg(long, default_value_t = 8787)]
+        phone_port: u16,
+        /// Port suggested for --relay-url (default 8788).
+        #[arg(long, default_value_t = 8788)]
+        daemon_port: u16,
+        /// Phone HTTPS listen address stored in config.
         #[arg(long, default_value = "0.0.0.0:8787")]
         listen: String,
-        /// Daemon mTLS listen address stored in config (default 0.0.0.0:8788).
+        /// Daemon mTLS listen address stored in config.
         #[arg(long, default_value = "0.0.0.0:8788")]
         daemon_listen: String,
-        /// Overwrite existing material.
+        /// Overwrite existing material (re-setup / change hostname).
         #[arg(long)]
         force: bool,
+        /// Keep the existing phone URL token when re-running with --force.
+        #[arg(long)]
+        keep_token: bool,
+        /// Never prompt (scripts); requires --tailscale or --rp-id/--origin.
+        #[arg(long)]
+        yes: bool,
     },
+    /// Print the current relay phone URL and transport.
+    RelayShow,
     /// Run the phone approval relay (PWA + mTLS daemon port).
     Relay {
         #[arg(long, default_value = "0.0.0.0:8787")]
@@ -151,13 +172,27 @@ async fn main() -> anyhow::Result<()> {
         Some(Cmd::RelayInit {
             rp_id,
             origin,
+            tailscale,
+            phone_port,
+            daemon_port,
             listen,
             daemon_listen,
             force,
-        }) => {
-            certs::RelayMaterial::init(&rp_id, &origin, &listen, &daemon_listen, force)?;
-            Ok(())
-        }
+            keep_token,
+            yes,
+        }) => setup::run_relay_init(setup::InitOpts {
+            rp_id,
+            origin,
+            listen,
+            daemon_listen,
+            phone_port,
+            daemon_port,
+            tailscale,
+            force,
+            keep_token,
+            yes,
+        }),
+        Some(Cmd::RelayShow) => setup::show_relay(),
         Some(Cmd::Relay {
             listen,
             daemon_listen,

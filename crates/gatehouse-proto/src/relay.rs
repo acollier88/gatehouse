@@ -51,4 +51,7 @@ pub struct RelayConfig {
     pub listen: String,
     /// Default daemon mTLS listen address (informational).
     pub daemon_listen: String,
+    /// How phones reach this relay: `tailscale`, `custom`, `localhost`, `hosted`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub transport: Option<String>,
 }
