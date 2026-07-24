@@ -1,14 +1,23 @@
-pub fn add(left: u64, right: u64) -> u64 {
-    left + right
-}
+//! Shared types for the gatehouse approval broker: the canonical request
+//! format, approval envelopes, the wire protocol, and well-known paths.
+//!
+//! Everything that feeds a digest lives in this crate so that the daemon,
+//! the CLI, and future signers (Touch ID, WebAuthn) can never disagree about
+//! what was approved.
 
-#[cfg(test)]
-mod tests {
-    use super::*;
+pub mod envelope;
+pub mod paths;
+pub mod request;
+pub mod wire;
 
-    #[test]
-    fn it_works() {
-        let result = add(2, 2);
-        assert_eq!(result, 4);
-    }
+pub use envelope::{ApprovalEnvelope, EnvelopeError, SigScheme};
+pub use request::{GateRequest, Operation};
+pub use wire::{
+    AgentMsg, CtlMsg, CtlResp, DaemonMsg, DecisionStatus, GrantInfo, PendingEntry, Tier,
+};
+
+#[derive(Debug, thiserror::Error)]
+pub enum ProtoError {
+    #[error("canonicalization failed: {0}")]
+    Canonicalize(#[from] serde_json::Error),
 }

@@ -1,0 +1,46 @@
+# Gatehouse default policy. Rules are evaluated top to bottom; first match
+# wins. Tiers: "allow" | "ask" | "ask_strong" | "deny".
+#
+# Add your project roots here so file writes inside them auto-allow:
+# workspace = ["~/Code"]
+
+default_tier = "ask"
+workspace = []
+
+[[rules]]
+name = "read-only basics"
+tier = "allow"
+argv0 = ["ls", "cat", "echo", "pwd", "rg", "grep", "head", "tail", "wc", "which", "file", "stat", "find"]
+
+[[rules]]
+name = "git read-only"
+tier = "allow"
+argv0 = ["git"]
+args_glob = ["status*", "diff*", "log*", "show*", "branch", "branch -v*", "remote -v", "fetch*"]
+
+[[rules]]
+name = "git push requires strong approval"
+tier = "ask_strong"
+argv0 = ["git"]
+args_glob = ["push*"]
+
+[[rules]]
+name = "recursive or forced rm requires strong approval"
+tier = "ask_strong"
+argv0 = ["rm"]
+args_glob = ["-r*", "-f*", "*-rf*", "*-fr*", "-R*"]
+
+[[rules]]
+name = "package installs"
+tier = "ask"
+argv0 = ["npm", "pnpm", "yarn", "bun", "cargo", "pip", "pip3", "uv", "brew"]
+
+[[rules]]
+name = "network fetch tools"
+tier = "ask_strong"
+argv0 = ["curl", "wget"]
+
+[[rules]]
+name = "privilege escalation denied"
+tier = "deny"
+argv0 = ["sudo", "doas", "su"]

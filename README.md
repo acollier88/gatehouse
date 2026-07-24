@@ -13,7 +13,7 @@ request cannot be replayed or swapped onto another.
 Early development. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap.
 
 - [ ] Phase 1 — core daemon, wire protocol, policy engine, terminal approvals
-- [ ] Phase 2 — Touch ID / Secure Enclave signer
+- [ ] Phase 2 — passkey (WebAuthn) approval + Touch ID / Secure Enclave signer
 - [ ] Phase 3 — Claude Code adapter (PreToolUse hook)
 - [ ] Phase 4 — phone approval (WebAuthn PWA + self-hosted relay)
 - [ ] Phase 5 — MCP gateway adapter, audit tooling, threat-model docs

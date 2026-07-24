@@ -41,9 +41,10 @@ gatehouse/
 - Session grants: `gate grant "npm install" --for 1h` writes a TTL'd in-memory grant.
 - Append-only JSONL audit log (`~/.local/share/gatehouse/audit.jsonl`), each entry hash-chained to the previous.
 
-### Phase 2 — Touch ID signer (`ask-strong` becomes real)
-- `gatehouse-macos`: Secure Enclave P-256 key via `SecKeyCreateRandomKey` with `kSecAttrTokenIDSecureEnclave` + access control `biometryCurrentSet` (crates: `security-framework`, `objc2-local-authentication`). `gate enroll` creates the key; the daemon triggers `LAContext` prompt showing the human-readable request summary, signs the digest envelope, verifies, releases.
-- Approval UI: native macOS prompt text carries the canonical summary ("Run `git push origin main` in ~/Code/foo"). Falls back to terminal y/n if no enrolled key (with loud warning).
+### Phase 2 — Strong approval: passkeys (WebAuthn) + Touch ID (`ask-strong` becomes real)
+- **Passkey path (primary):** the daemon serves a localhost-only approval page (embedded HTTP on `127.0.0.1`, random port + bearer token). `gate enroll` opens it to register a passkey with the platform authenticator — on macOS that is Touch ID via WebAuthn, elsewhere whatever platform authenticator exists, so this path stays OS-agnostic. An `ask-strong` request pops the page, which displays the canonical summary and requests a WebAuthn assertion whose challenge is the request digest envelope. Daemon verifies with `webauthn-rs`. **Phase 4 reuses this exact enrollment + verification stack over a relay for phones** — the phase 4 delta is transport (relay + Web Push), not crypto.
+- **Native Secure Enclave signer (secondary/optional):** `gatehouse-macos` crate — SE P-256 key (`kSecAttrTokenIDSecureEnclave`, `biometryCurrentSet`) with `LAContext` prompt carrying the canonical summary. Both back the same signer/verifier trait, so either can satisfy `ask-strong`.
+- Falls back to operator terminal approval if nothing is enrolled (with loud warning).
 
 ### Phase 3 — Claude Code adapter
 - PreToolUse hook (Bash + Write/Edit matchers) that shells to `gate ask --harness claude-code --json` and maps decision → hook allow/deny output. Blocks until decision or timeout (configurable, default deny on timeout).
