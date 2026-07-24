@@ -289,5 +289,73 @@ if "$bin/gate" run -- git push origin main >/dev/null 2>&1; then
   fail "git push should deny when relay dies before approval"
 fi
 
+# --- Phase 6: hosted / device-token relay ---------------------------------
+kill "$daemon_pid" 2>/dev/null || true
+wait "$daemon_pid" 2>/dev/null || true
+daemon_pid=""
+kill "$relay_pid" 2>/dev/null || true
+wait "$relay_pid" 2>/dev/null || true
+relay_pid=""
+rm -f "$GATEHOUSE_RUNTIME_DIR"/*.sock "$GATEHOUSE_RUNTIME_DIR"/http.json
+
+ports="$(python3 - <<'PY'
+import socket
+def free():
+    s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+print(free())
+PY
+)"
+hosted_port="$ports"
+
+echo "== phase 6: hosted relay-init + device token dial-out"
+"$bin/gatehoused" relay-init --hosted \
+  --rp-id localhost \
+  --origin "https://localhost:${hosted_port}" \
+  --listen "127.0.0.1:${hosted_port}" \
+  --daemon-listen "127.0.0.1:0" \
+  --force --yes >/dev/null
+
+"$bin/gatehoused" device-enroll --label e2e \
+  --endpoint "https://localhost:${hosted_port}" --write >/dev/null
+device_id="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/device.json"))["device_id"])')"
+token="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/relay/config.json"))["phone_token"])')"
+
+"$bin/gatehoused" relay \
+  --listen "127.0.0.1:${hosted_port}" \
+  --daemon-listen "127.0.0.1:1" \
+  >"$tmp/relay-hosted.log" 2>&1 &
+relay_pid=$!
+
+# No --relay-url: daemon loads device.json and dials token WS on phone port.
+"$bin/gatehoused" --no-open --approval-timeout-secs 3 \
+  >"$tmp/daemon-hosted.log" 2>&1 &
+daemon_pid=$!
+
+for _ in $(seq 80); do
+  if [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] \
+    && curl -skf -H "X-Gatehouse-Token: $token" -H "X-Gatehouse-Device: $device_id" \
+         "https://localhost:${hosted_port}/api/pending?d=${device_id}" >/dev/null 2>&1; then
+    break
+  fi
+  sleep 0.1
+done
+curl -skf -H "X-Gatehouse-Token: $token" -H "X-Gatehouse-Device: $device_id" \
+  "https://localhost:${hosted_port}/api/pending?d=${device_id}" >/dev/null \
+  || fail "hosted relay/daemon not ready: $(tail -n 30 "$tmp/relay-hosted.log" "$tmp/daemon-hosted.log")"
+
+echo "== phase 6: unknown device is unavailable"
+code="$(curl -sk -o /dev/null -w '%{http_code}' \
+  -H "X-Gatehouse-Token: $token" -H 'X-Gatehouse-Device: dev_missing' \
+  "https://localhost:${hosted_port}/api/pending?d=dev_missing")"
+[ "$code" = "503" ] || fail "missing device should be 503, got $code"
+
+echo "== phase 6: forged approval still rejected"
+code="$(curl -sk -o /dev/null -w '%{http_code}' \
+  -H "X-Gatehouse-Token: $token" -H "X-Gatehouse-Device: $device_id" \
+  -H 'Content-Type: application/json' \
+  -d '{"approved":true,"digest":"deadbeef"}' \
+  "https://localhost:${hosted_port}/api/approve/finish?d=${device_id}")"
+[ "$code" = "401" ] || fail "forged finish should be 401, got $code"
+
 echo
 echo "ALL E2E TESTS PASSED"

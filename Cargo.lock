@@ -657,6 +657,7 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tokio-tungstenite 0.26.2",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "url",

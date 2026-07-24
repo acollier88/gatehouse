@@ -2,6 +2,7 @@ mod audit;
 mod binding;
 mod certs;
 mod ctl;
+mod devices;
 mod enroll;
 mod phone;
 mod policy;
@@ -14,7 +15,7 @@ mod web;
 
 use std::net::SocketAddr;
 use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
@@ -27,6 +28,7 @@ use webauthn_rs::prelude::Passkey;
 use audit::Audit;
 use phone::load_phone_passkeys;
 use policy::Policy;
+use relay_client::DialConfig;
 use state::Shared;
 
 #[derive(Parser)]
@@ -41,9 +43,12 @@ struct Args {
     /// Don't auto-open the approval page when an ask-strong request arrives.
     #[arg(long, global = true)]
     no_open: bool,
-    /// Dial out to a phone approval relay (wss/https URL of the daemon mTLS port).
+    /// Dial out to a phone approval relay (mTLS daemon URL, or phone URL with --relay-token).
     #[arg(long, global = true)]
     relay_url: Option<String>,
+    /// Device enrollment token for hosted / token-auth relays.
+    #[arg(long, global = true)]
+    relay_token: Option<String>,
 }
 
 #[derive(Subcommand)]
@@ -62,6 +67,12 @@ enum Cmd {
         /// Auto-fill rp_id/origin from `tailscale status` MagicDNS name.
         #[arg(long)]
         tailscale: bool,
+        /// Hosted / integrator mode (token daemon auth on the phone port).
+        #[arg(long)]
+        hosted: bool,
+        /// Daemon control-plane auth: mtls | token | both.
+        #[arg(long)]
+        daemon_auth: Option<String>,
         /// Port embedded in the generated https:// origin (default 8787).
         #[arg(long, default_value_t = 8787)]
         phone_port: u16,
@@ -86,13 +97,39 @@ enum Cmd {
     },
     /// Print the current relay phone URL and transport.
     RelayShow,
-    /// Run the phone approval relay (PWA + mTLS daemon port).
+    /// Run the phone approval relay (PWA + mTLS / token daemon port).
     Relay {
         #[arg(long, default_value = "0.0.0.0:8787")]
         listen: String,
         #[arg(long, default_value = "0.0.0.0:8788")]
         daemon_listen: String,
     },
+    /// Enroll a broker device for token-auth / hosted relays (run on relay host).
+    DeviceEnroll {
+        #[arg(long, default_value = "laptop")]
+        label: String,
+        /// HTTPS base the daemon will dial (usually the phone origin).
+        #[arg(long)]
+        endpoint: Option<String>,
+        /// Also write `device.json` (daemon credential) locally.
+        #[arg(long)]
+        write: bool,
+        #[arg(long)]
+        dest: Option<PathBuf>,
+    },
+    /// Write `device.json` for an already-enrolled device_id.
+    DeviceCred {
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        endpoint: String,
+        #[arg(long)]
+        write: bool,
+        #[arg(long)]
+        dest: Option<PathBuf>,
+    },
+    /// List enrolled relay devices.
+    DeviceList,
 }
 
 pub struct Ctx {
@@ -177,6 +214,8 @@ async fn main() -> anyhow::Result<()> {
             rp_id,
             origin,
             tailscale,
+            hosted,
+            daemon_auth,
             phone_port,
             daemon_port,
             listen,
@@ -192,6 +231,8 @@ async fn main() -> anyhow::Result<()> {
             phone_port,
             daemon_port,
             tailscale,
+            hosted,
+            daemon_auth,
             force,
             keep_token,
             yes,
@@ -205,6 +246,41 @@ async fn main() -> anyhow::Result<()> {
             let daemon_listen: SocketAddr = daemon_listen.parse()?;
             relay::run(listen, daemon_listen).await
         }
+        Some(Cmd::DeviceEnroll {
+            label,
+            endpoint,
+            write,
+            dest,
+        }) => {
+            let _ = devices::require_relay_config()?;
+            let rec = devices::enroll(&label)?;
+            let endpoint = endpoint.unwrap_or_else(|| {
+                certs::RelayMaterial::load()
+                    .map(|m| m.config.origin.clone())
+                    .unwrap_or_else(|_| "https://YOUR_RELAY_HOST:8787".into())
+            });
+            if write {
+                devices::write_daemon_cred(&rec, &endpoint, dest.as_deref())?;
+            } else {
+                devices::print_pair_instructions(&rec, &endpoint);
+            }
+            Ok(())
+        }
+        Some(Cmd::DeviceCred {
+            device_id,
+            endpoint,
+            write,
+            dest,
+        }) => {
+            let rec = devices::find(&device_id)?;
+            if write {
+                devices::write_daemon_cred(&rec, &endpoint, dest.as_deref())?;
+            } else {
+                devices::print_pair_instructions(&rec, &endpoint);
+            }
+            Ok(())
+        }
+        Some(Cmd::DeviceList) => devices::list(),
         None => run_daemon(args).await,
     }
 }
@@ -255,7 +331,10 @@ async fn run_daemon(args: Args) -> anyhow::Result<()> {
     });
 
     let started = Instant::now();
-    let relay_url = args.relay_url.clone();
+    let dial = DialConfig::resolve(args.relay_url.clone(), args.relay_token.clone())?;
+    if dial.is_some() {
+        info!("relay dial-out configured");
+    }
     tokio::select! {
         _ = server::run(agent, ctx.clone()) => {}
         _ = ctl::run(ctl, ctx.clone(), started) => {}
@@ -265,8 +344,8 @@ async fn run_daemon(args: Args) -> anyhow::Result<()> {
             }
         }
         r = async {
-            if let Some(url) = relay_url {
-                relay_client::run(ctx.clone(), &url).await
+            if let Some(cfg) = dial {
+                relay_client::run(ctx.clone(), cfg).await
             } else {
                 std::future::pending::<anyhow::Result<()>>().await
             }

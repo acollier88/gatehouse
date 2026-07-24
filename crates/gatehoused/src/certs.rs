@@ -23,6 +23,19 @@ pub struct RelayMaterial {
     pub dir: PathBuf,
 }
 
+/// Everything `relay-init` decides before certs are minted.
+pub struct MaterialSpec<'a> {
+    pub rp_id: &'a str,
+    pub origin: &'a str,
+    pub listen: &'a str,
+    pub daemon_listen: &'a str,
+    pub force: bool,
+    /// Reuse the current phone bearer across a `--force` re-init.
+    pub keep_token: Option<String>,
+    pub transport: Option<String>,
+    pub daemon_auth: Option<String>,
+}
+
 impl RelayMaterial {
     pub fn load() -> anyhow::Result<Self> {
         let dir = paths::relay_dir();
@@ -33,15 +46,17 @@ impl RelayMaterial {
         Ok(Self { config, dir })
     }
 
-    pub fn init(
-        rp_id: &str,
-        origin: &str,
-        listen: &str,
-        daemon_listen: &str,
-        force: bool,
-        keep_token: Option<String>,
-        transport: Option<String>,
-    ) -> anyhow::Result<Self> {
+    pub fn init(spec: MaterialSpec<'_>) -> anyhow::Result<Self> {
+        let MaterialSpec {
+            rp_id,
+            origin,
+            listen,
+            daemon_listen,
+            force,
+            keep_token,
+            transport,
+            daemon_auth,
+        } = spec;
         let dir = paths::relay_dir();
         std::fs::create_dir_all(&dir)?;
         let cfg_path = paths::relay_config_path();
@@ -98,6 +113,7 @@ impl RelayMaterial {
             listen: listen.to_string(),
             daemon_listen: daemon_listen.to_string(),
             transport,
+            daemon_auth,
         };
         let cfg_json = serde_json::to_string_pretty(&config)?;
         write_pem(&cfg_path, cfg_json)?;
@@ -153,6 +169,33 @@ impl RelayMaterial {
             .with_client_auth_cert(certs, key)
             .context("daemon mTLS client config")
     }
+
+    /// Server-auth TLS client for token-authenticated dial-out (no client cert).
+    pub fn token_client_config(&self) -> anyhow::Result<ClientConfig> {
+        let mut roots = RootCertStore::empty();
+        if self.dir.join(CA_CERT).exists() {
+            for c in load_certs(&self.dir.join(CA_CERT))? {
+                roots.add(c)?;
+            }
+        }
+        roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        Ok(ClientConfig::builder()
+            .with_root_certificates(roots)
+            .with_no_client_auth())
+    }
+
+    pub fn daemon_auth(&self) -> &str {
+        self.config.daemon_auth.as_deref().unwrap_or("mtls")
+    }
+}
+
+/// Public-CA (or empty) TLS client when the daemon has no local relay material.
+pub fn public_tls_client() -> anyhow::Result<ClientConfig> {
+    let mut roots = RootCertStore::empty();
+    roots.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+    Ok(ClientConfig::builder()
+        .with_root_certificates(roots)
+        .with_no_client_auth())
 }
 
 fn new_token() -> String {

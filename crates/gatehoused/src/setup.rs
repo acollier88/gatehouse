@@ -12,7 +12,7 @@ use anyhow::{bail, Context};
 use gatehouse_proto::paths;
 use tracing::info;
 
-use crate::certs::RelayMaterial;
+use crate::certs::{MaterialSpec, RelayMaterial};
 
 pub struct InitOpts {
     pub rp_id: Option<String>,
@@ -23,6 +23,10 @@ pub struct InitOpts {
     pub daemon_port: u16,
     /// Prefer Tailscale MagicDNS when resolving missing rp_id/origin.
     pub tailscale: bool,
+    /// Hosted / integrator mode: token daemon auth (no shared CA copy).
+    pub hosted: bool,
+    /// Override daemon auth: `mtls`, `token`, or `both`.
+    pub daemon_auth: Option<String>,
     pub force: bool,
     /// Keep the existing phone bearer token across --force re-setup.
     pub keep_token: bool,
@@ -47,6 +51,16 @@ pub fn run_relay_init(opts: InitOpts) -> anyhow::Result<()> {
     }
 
     let (rp_id, origin, transport) = resolve_endpoints(&opts)?;
+    let daemon_auth = opts
+        .daemon_auth
+        .clone()
+        .or_else(|| {
+            if opts.hosted || transport == "hosted" {
+                Some("token".into())
+            } else {
+                Some("mtls".into())
+            }
+        });
     let keep = if opts.keep_token {
         RelayMaterial::load().ok().map(|m| m.config.phone_token)
     } else {
@@ -64,45 +78,65 @@ pub fn run_relay_init(opts: InitOpts) -> anyhow::Result<()> {
         }
     }
 
-    let material = RelayMaterial::init(
-        &rp_id,
-        &origin,
-        &opts.listen,
-        &opts.daemon_listen,
-        opts.force,
-        keep,
-        Some(transport.clone()),
-    )?;
+    let material = RelayMaterial::init(MaterialSpec {
+        rp_id: &rp_id,
+        origin: &origin,
+        listen: &opts.listen,
+        daemon_listen: &opts.daemon_listen,
+        force: opts.force,
+        keep_token: keep,
+        transport: Some(transport.clone()),
+        daemon_auth: daemon_auth.clone(),
+    })?;
     println!();
-    println!("transport: {transport}");
-    println!("phone URL: {}", material.phone_url());
-    println!(
-        "daemon:    gatehoused --relay-url https://{rp_id}:{} --no-open",
-        opts.daemon_port
-    );
-    println!(
-        "relay:     gatehoused relay --listen {} --daemon-listen {}",
-        opts.listen, opts.daemon_listen
-    );
+    println!("transport:   {transport}");
+    println!("daemon_auth: {}", daemon_auth.as_deref().unwrap_or("mtls"));
+    println!("phone URL:   {}", material.phone_url());
+    if daemon_auth.as_deref() == Some("token") {
+        println!("daemon:      enroll with: gatehoused device-enroll --label laptop --write \\");
+        println!(
+            "                --endpoint https://{rp_id}:{}",
+            opts.phone_port
+        );
+        println!(
+            "relay:       gatehoused relay --listen {} --daemon-listen {}",
+            opts.listen, opts.daemon_listen
+        );
+        println!("             (token WS is on the phone port /ws)");
+    } else {
+        println!(
+            "daemon:      gatehoused --relay-url https://{rp_id}:{} --no-open",
+            opts.daemon_port
+        );
+        println!(
+            "relay:       gatehoused relay --listen {} --daemon-listen {}",
+            opts.listen, opts.daemon_listen
+        );
+    }
     Ok(())
 }
 
 pub fn show_relay() -> anyhow::Result<()> {
     let m = RelayMaterial::load()?;
-    println!("rp_id:     {}", m.config.rp_id);
-    println!("origin:    {}", m.config.origin);
+    println!("rp_id:       {}", m.config.rp_id);
+    println!("origin:      {}", m.config.origin);
     if let Some(t) = &m.config.transport {
-        println!("transport: {t}");
+        println!("transport:   {t}");
     }
-    println!("phone URL: {}", m.phone_url());
-    println!("listen:    {}", m.config.listen);
-    println!("daemon:    {}", m.config.daemon_listen);
+    println!("daemon_auth: {}", m.daemon_auth());
+    println!("phone URL:   {}", m.phone_url());
+    println!("listen:      {}", m.config.listen);
+    println!("daemon:      {}", m.config.daemon_listen);
+    let n = crate::devices::load_devices().map(|d| d.len()).unwrap_or(0);
+    println!("devices:     {n}");
     Ok(())
 }
 
 fn resolve_endpoints(opts: &InitOpts) -> anyhow::Result<(String, String, String)> {
     if let (Some(rp), Some(origin)) = (&opts.rp_id, &opts.origin) {
-        let transport = if opts.tailscale || looks_like_tailscale(rp) {
+        let transport = if opts.hosted {
+            "hosted"
+        } else if opts.tailscale || looks_like_tailscale(rp) {
             "tailscale"
         } else if origin.contains("localhost") {
             "localhost"
@@ -123,7 +157,9 @@ fn resolve_endpoints(opts: &InitOpts) -> anyhow::Result<(String, String, String)
             .origin
             .clone()
             .unwrap_or_else(|| format!("https://{rp}:{}", opts.phone_port));
-        let transport = if looks_like_tailscale(rp) {
+        let transport = if opts.hosted {
+            "hosted"
+        } else if looks_like_tailscale(rp) {
             "tailscale"
         } else {
             "custom"

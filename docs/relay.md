@@ -35,8 +35,16 @@ Copy the same `relay/` directory to whichever machine runs the relay if it is
 not the daemon host. The daemon needs the client cert; the relay needs the
 server cert + CA.
 
-Integrator-hosted endpoints (Cursor/Claude/etc. providing the phone RP):
-see [hosted-relay.md](hosted-relay.md).
+Hosted / device-token mode (no shared CA copy):
+
+```sh
+gatehoused relay-init --hosted --rp-id approve.example.com \
+  --origin https://approve.example.com:8787 --yes
+gatehoused device-enroll --label laptop --write \
+  --endpoint https://approve.example.com:8787
+```
+
+See [hosted-relay.md](hosted-relay.md).
 
 ## Run
 
