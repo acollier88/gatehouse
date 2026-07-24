@@ -5,23 +5,22 @@ use std::time::{Duration, Instant};
 
 use gatehouse_proto::{ApprovalEnvelope, CtlMsg, CtlResp, SigScheme};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixListener;
 use tracing::warn;
 
 use crate::audit::now_unix;
+use crate::ipc::{self, LocalListener};
 use crate::Ctx;
 
 /// Operator approvals are valid this long once issued; generous because the
 /// waiting submit task consumes them immediately.
 const OPERATOR_ENVELOPE_TTL_SECS: i64 = 120;
 
-pub async fn run(listener: UnixListener, ctx: Arc<Ctx>, started: Instant) {
+pub async fn run(listener: LocalListener, ctx: Arc<Ctx>, started: Instant) {
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
+        match ipc::accept(&listener).await {
+            Ok((read, mut write)) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    let (read, mut write) = stream.into_split();
                     let mut lines = BufReader::new(read).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
                         let resp = match serde_json::from_str::<CtlMsg>(&line) {
@@ -38,7 +37,7 @@ pub async fn run(listener: UnixListener, ctx: Arc<Ctx>, started: Instant) {
                     }
                 });
             }
-            Err(e) => warn!("ctl socket accept failed: {e}"),
+            Err(e) => warn!("ctl ipc accept failed: {e}"),
         }
     }
 }

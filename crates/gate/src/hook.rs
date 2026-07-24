@@ -11,11 +11,10 @@ use std::io::Read;
 use std::process::ExitCode;
 
 use anyhow::Context;
-use gatehouse_proto::{
-    paths, AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation,
-};
+use gatehouse_proto::{AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
+
+use crate::ipc;
 
 /// Shell syntax that makes a command string more than a plain argv: pipes,
 /// redirection, substitution, chaining. Anything containing these is
@@ -104,8 +103,7 @@ fn command_to_op(cmd: &str, cwd: &str) -> Operation {
 
 /// Submit in advisory mode and wait for the terminal decision.
 async fn decide(request: GateRequest) -> anyhow::Result<(DecisionStatus, String)> {
-    let stream = UnixStream::connect(paths::agent_sock()).await?;
-    let (read, mut write) = stream.into_split();
+    let (read, mut write) = ipc::connect_agent().await?;
     let mut msg = serde_json::to_string(&AgentMsg::Submit {
         request,
         execute: false,

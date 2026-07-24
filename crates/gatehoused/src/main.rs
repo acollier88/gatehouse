@@ -1,6 +1,7 @@
 mod audit;
 mod certs;
 mod ctl;
+mod ipc;
 mod phone;
 mod policy;
 mod relay;
@@ -11,14 +12,11 @@ mod state;
 mod web;
 
 use std::net::SocketAddr;
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{Duration, Instant};
 
 use clap::{Parser, Subcommand};
 use gatehouse_proto::{paths, Tier};
-use tokio::net::UnixListener;
 use tracing::{info, warn};
 use webauthn_rs::prelude::Passkey;
 
@@ -133,7 +131,11 @@ pub fn save_passkeys(keys: &[Passkey]) {
     let write = || -> anyhow::Result<()> {
         std::fs::create_dir_all(path.parent().unwrap())?;
         std::fs::write(&path, serde_json::to_string_pretty(keys)?)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     };
     if let Err(e) = write() {
@@ -219,16 +221,10 @@ async fn run_daemon(args: Args) -> anyhow::Result<()> {
         policy.default_tier
     );
 
-    let agent_path = paths::agent_sock();
-    let ctl_path = paths::ctl_sock();
-    let run_dir = agent_path.parent().unwrap();
-    std::fs::create_dir_all(run_dir)?;
-    std::fs::set_permissions(run_dir, std::fs::Permissions::from_mode(0o700))?;
-    let agent = bind(&agent_path)?;
-    let ctl = bind(&ctl_path)?;
-    info!("agent socket: {}", agent_path.display());
-    info!("ctl socket:   {}", ctl_path.display());
-    info!("audit log:    {}", paths::audit_path().display());
+    std::fs::create_dir_all(paths::runtime_dir())?;
+    let (agent, agent_ep) = ipc::bind_agent().await?;
+    let (ctl, ctl_ep) = ipc::bind_ctl().await?;
+    info!("audit log: {}", paths::audit_path().display());
 
     let passkeys = load_passkeys();
     let phone_passkeys = load_phone_passkeys();
@@ -275,16 +271,6 @@ async fn run_daemon(args: Args) -> anyhow::Result<()> {
         }
     }
     let _ = std::fs::remove_file(paths::http_info_path());
-    let _ = std::fs::remove_file(&agent_path);
-    let _ = std::fs::remove_file(&ctl_path);
+    ipc::cleanup(&agent_ep, &ctl_ep);
     Ok(())
-}
-
-fn bind(path: &Path) -> anyhow::Result<UnixListener> {
-    if path.exists() {
-        std::fs::remove_file(path)?;
-    }
-    let listener = UnixListener::bind(path)?;
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
-    Ok(listener)
 }

@@ -1,4 +1,5 @@
 mod hook;
+mod ipc;
 
 use std::io::Write as _;
 use std::process::ExitCode;
@@ -10,7 +11,6 @@ use gatehouse_proto::{
     paths, AgentMsg, CtlMsg, CtlResp, DaemonMsg, DecisionStatus, GateRequest, Operation,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 
 #[derive(Parser)]
 #[command(name = "gate", about = "Gatehouse client — route agent operations through the approval broker")]
@@ -117,10 +117,16 @@ fn open_approval_page() -> anyhow::Result<ExitCode> {
         format!("http://localhost:{}/?t={}", info.port, info.token)
     };
     println!("approval page: {url}");
-    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
-    match std::process::Command::new(opener).arg(&url).spawn() {
-        Ok(_) => {}
-        Err(e) => eprintln!("could not launch browser ({e}); open the URL manually"),
+    #[cfg(target_os = "macos")]
+    let launch = std::process::Command::new("open").arg(&url).spawn();
+    #[cfg(target_os = "windows")]
+    let launch = std::process::Command::new("cmd")
+        .args(["/C", "start", "", &url])
+        .spawn();
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
+    let launch = std::process::Command::new("xdg-open").arg(&url).spawn();
+    if let Err(e) = launch {
+        eprintln!("could not launch browser ({e}); open the URL manually");
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -147,14 +153,7 @@ async fn submit(
         op: Operation::Exec { argv, cwd },
     };
 
-    let sock = paths::agent_sock();
-    let stream = UnixStream::connect(&sock).await.with_context(|| {
-        format!(
-            "cannot reach gatehoused at {} — is the daemon running?",
-            sock.display()
-        )
-    })?;
-    let (read, mut write) = stream.into_split();
+    let (read, mut write) = ipc::connect_agent().await?;
     let mut msg = serde_json::to_string(&AgentMsg::Submit { request, execute })?;
     msg.push('\n');
     write.write_all(msg.as_bytes()).await?;
@@ -214,14 +213,7 @@ async fn submit(
 }
 
 async fn ctl(msg: CtlMsg) -> anyhow::Result<ExitCode> {
-    let sock = paths::ctl_sock();
-    let stream = UnixStream::connect(&sock).await.with_context(|| {
-        format!(
-            "cannot reach gatehoused ctl at {} — is the daemon running?",
-            sock.display()
-        )
-    })?;
-    let (read, mut write) = stream.into_split();
+    let (read, mut write) = ipc::connect_ctl().await?;
     let mut line = serde_json::to_string(&msg)?;
     line.push('\n');
     write.write_all(line.as_bytes()).await?;

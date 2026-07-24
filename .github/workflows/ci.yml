@@ -1,0 +1,47 @@
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo test
+        run: cargo test --workspace
+      - name: e2e (unix)
+        if: runner.os != 'Windows'
+        run: |
+          cargo build --workspace
+          chmod +x tests/e2e.sh
+          tests/e2e.sh
+      - name: tcp ipc smoke (all)
+        shell: bash
+        run: |
+          cargo build -p gate -p gatehoused
+          export GATEHOUSE_IPC=tcp
+          export GATEHOUSE_RUNTIME_DIR="${RUNNER_TEMP:-/tmp}/gh-run-$$"
+          export GATEHOUSE_CONFIG_DIR="${RUNNER_TEMP:-/tmp}/gh-cfg-$$"
+          export GATEHOUSE_DATA_DIR="${RUNNER_TEMP:-/tmp}/gh-data-$$"
+          mkdir -p "$GATEHOUSE_RUNTIME_DIR" "$GATEHOUSE_CONFIG_DIR" "$GATEHOUSE_DATA_DIR"
+          bin=target/debug
+          if [ -f target/debug/gatehoused.exe ]; then bin=target/debug; EXT=.exe; else EXT=; fi
+          "$bin/gatehoused$EXT" --no-open --approval-timeout-secs 30 &
+          pid=$!
+          trap 'kill $pid 2>/dev/null || true' EXIT
+          for i in $(seq 50); do
+            [ -f "$GATEHOUSE_RUNTIME_DIR/agent.endpoint.json" ] && break
+            sleep 0.1
+          done
+          "$bin/gate$EXT" run -- echo hello-tcp | grep -q hello-tcp
