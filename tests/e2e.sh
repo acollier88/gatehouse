@@ -24,10 +24,11 @@ fail() { echo "FAIL: $*" >&2; exit 1; }
 "$bin/gatehoused" --approval-timeout-secs 30 >"$tmp/daemon.log" 2>&1 &
 daemon_pid=$!
 for _ in $(seq 50); do
-  [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] && break
+  [ -f "$GATEHOUSE_RUNTIME_DIR/agent.endpoint.json" ] || [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] && break
   sleep 0.1
 done
-[ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] || fail "daemon did not start: $(cat "$tmp/daemon.log")"
+[ -f "$GATEHOUSE_RUNTIME_DIR/agent.endpoint.json" ] || [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] \
+  || fail "daemon did not start: $(cat "$tmp/daemon.log")"
 
 echo "== allow tier executes and streams output"
 out="$("$bin/gate" run -- echo hello-gatehouse)"
@@ -156,7 +157,7 @@ relay_pid=$!
 daemon_pid=$!
 
 for _ in $(seq 80); do
-  if [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] \
+  if { [ -f "$GATEHOUSE_RUNTIME_DIR/agent.endpoint.json" ] || [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ]; } \
     && curl -skf -H "X-Gatehouse-Token: $token" \
          "https://localhost:${phone_port}/api/pending" >/dev/null 2>&1; then
     break

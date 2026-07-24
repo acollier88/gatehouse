@@ -45,12 +45,15 @@ pub fn load_phone_passkeys() -> Vec<Passkey> {
 }
 
 pub fn save_phone_passkeys(keys: &[Passkey]) {
-    use std::os::unix::fs::PermissionsExt;
     let path = paths::phone_passkeys_path();
     let write = || -> anyhow::Result<()> {
         std::fs::create_dir_all(path.parent().unwrap())?;
         std::fs::write(&path, serde_json::to_string_pretty(keys)?)?;
-        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+        }
         Ok(())
     };
     if let Err(e) = write() {

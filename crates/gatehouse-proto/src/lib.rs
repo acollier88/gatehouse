@@ -6,12 +6,14 @@
 //! what was approved.
 
 pub mod envelope;
+pub mod ipc;
 pub mod paths;
 pub mod relay;
 pub mod request;
 pub mod wire;
 
 pub use envelope::{ApprovalEnvelope, EnvelopeError, SigScheme};
+pub use ipc::{Endpoint, Transport};
 pub use relay::{DaemonToRelay, RelayConfig, RelayMethod, RelayToDaemon};
 pub use request::{GateRequest, Operation};
 pub use wire::{

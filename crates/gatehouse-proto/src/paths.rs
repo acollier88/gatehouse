@@ -5,7 +5,7 @@
 
 use std::path::PathBuf;
 
-fn runtime_dir() -> PathBuf {
+pub fn runtime_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("GATEHOUSE_RUNTIME_DIR") {
         return PathBuf::from(dir);
     }

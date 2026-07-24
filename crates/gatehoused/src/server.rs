@@ -6,17 +6,16 @@ use base64::Engine;
 use gatehouse_proto::{
     AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation, Tier,
 };
-use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::unix::OwnedWriteHalf;
-use tokio::net::UnixListener;
+use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
 use crate::audit::now_unix;
+use crate::ipc::{self, LocalListener};
 use crate::state::Pending;
 use crate::Ctx;
 
-type Writer = Arc<tokio::sync::Mutex<OwnedWriteHalf>>;
+type Writer = Arc<tokio::sync::Mutex<Box<dyn AsyncWrite + Unpin + Send>>>;
 
 async fn send(w: &Writer, msg: &DaemonMsg) {
     let mut line = serde_json::to_string(msg).expect("serializable");
@@ -24,13 +23,12 @@ async fn send(w: &Writer, msg: &DaemonMsg) {
     let _ = w.lock().await.write_all(line.as_bytes()).await;
 }
 
-pub async fn run(listener: UnixListener, ctx: Arc<Ctx>) {
+pub async fn run(listener: LocalListener, ctx: Arc<Ctx>) {
     loop {
-        match listener.accept().await {
-            Ok((stream, _)) => {
+        match ipc::accept(&listener).await {
+            Ok((read, write)) => {
                 let ctx = ctx.clone();
                 tokio::spawn(async move {
-                    let (read, write) = stream.into_split();
                     let w: Writer = Arc::new(tokio::sync::Mutex::new(write));
                     let mut lines = BufReader::new(read).lines();
                     while let Ok(Some(line)) = lines.next_line().await {
@@ -52,7 +50,7 @@ pub async fn run(listener: UnixListener, ctx: Arc<Ctx>) {
                 });
             }
             Err(e) => {
-                warn!("agent socket accept failed: {e}");
+                warn!("agent ipc accept failed: {e}");
             }
         }
     }
@@ -280,7 +278,13 @@ fn open_browser(url: &str) {
     {
         let _ = std::process::Command::new("open").arg(url).spawn();
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let _ = std::process::Command::new("cmd")
+            .args(["/C", "start", "", url])
+            .spawn();
+    }
+    #[cfg(all(not(target_os = "macos"), not(target_os = "windows")))]
     {
         let _ = std::process::Command::new("xdg-open").arg(url).spawn();
     }

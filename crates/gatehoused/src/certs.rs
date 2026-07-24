@@ -163,9 +163,12 @@ fn new_token() -> String {
 }
 
 fn write_pem(path: impl AsRef<Path>, pem: impl AsRef<[u8]>) -> anyhow::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
     std::fs::write(path.as_ref(), pem.as_ref())?;
-    std::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(path.as_ref(), std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 
