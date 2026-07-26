@@ -4,8 +4,17 @@
 //! - **Phone** (`--listen`): server-auth TLS, serves the PWA, requires the
 //!   phone bearer token. Forwards API calls to the connected daemon.
 //! - **Daemon** (`--daemon-listen`): mTLS (client cert required). One
-//!   WebSocket at a time carries RPCs; ceremonies stay on the daemon so a
-//!   compromised relay cannot forge approvals.
+//!   WebSocket at a time carries RPCs; ceremonies stay on the daemon.
+//!
+//! Trust: the relay is transport. It cannot manufacture an approval — release
+//! needs an assertion the daemon verifies against an enrolled passkey — and it
+//! can no longer redirect a real approval onto another request, because the
+//! ceremony challenge is derived from the request digest and re-derived at
+//! release (`crate::binding`). What a relay *can* still do is serve malicious
+//! PWA JavaScript: it controls the page, so it can lie about what the gesture
+//! is for. The verification code shown next to the approve button is the
+//! human's out-of-band check against the daemon terminal; a pinned native
+//! client is the full fix. See docs/threat-model.md.
 
 use std::collections::HashMap;
 use std::net::SocketAddr;
@@ -19,6 +28,7 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use gatehouse_proto::{DaemonToRelay, RelayMethod, RelayToDaemon};
+use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -118,12 +128,16 @@ self.addEventListener('message', e => {
     )
 }
 
+/// Constant-time: the phone token is a bearer secret on a public listener.
 fn authed(state: &RelayState, headers: &HeaderMap) -> Result<(), StatusCode> {
     let presented = headers
         .get("x-gatehouse-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if presented == state.material.config.phone_token {
+    let expected = state.material.config.phone_token.as_bytes();
+    let ok = presented.len() == expected.len()
+        && bool::from(presented.as_bytes().ct_eq(expected));
+    if ok {
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -182,11 +196,12 @@ async fn api_pending(
 async fn api_register_start(
     State(state): State<Arc<RelayState>>,
     headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     authed(&state, &headers)?;
-    Ok(Json(
-        rpc(&state, RelayMethod::RegisterStart, serde_json::json!({})).await?,
-    ))
+    // Carries the one-time enrollment code; the daemon validates it.
+    let body = body.map(|Json(v)| v).unwrap_or_else(|| serde_json::json!({}));
+    Ok(Json(rpc(&state, RelayMethod::RegisterStart, body).await?))
 }
 
 async fn api_register_finish(

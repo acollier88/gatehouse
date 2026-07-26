@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use gatehouse_proto::{ApprovalEnvelope, CtlMsg, CtlResp, SigScheme};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixListener;
-use tracing::warn;
+use tracing::{info, warn};
 
 use crate::audit::now_unix;
 use crate::Ctx;
@@ -63,6 +63,14 @@ fn handle(ctx: &Arc<Ctx>, msg: CtlMsg, started: Instant) -> CtlResp {
             grants: ctx.state.grant_snapshot(),
             uptime_secs: started.elapsed().as_secs(),
         },
+        CtlMsg::EnrollCode => {
+            let code = ctx.enroll_codes.issue();
+            info!("enrollment code issued (valid {}s)", crate::enroll::CODE_TTL.as_secs());
+            CtlResp::EnrollCode {
+                code,
+                ttl_secs: crate::enroll::CODE_TTL.as_secs(),
+            }
+        }
     }
 }
 

@@ -2,8 +2,10 @@
 //!
 //! The phone talks HTTPS to the relay; the relay forwards each API call to
 //! the daemon over an mTLS WebSocket. Ceremonies and passkey verification
-//! always happen on the daemon — a compromised relay cannot forge an
-//! approval without a valid WebAuthn assertion.
+//! always happen on the daemon — a compromised relay cannot forge an approval
+//! without a valid WebAuthn assertion, and cannot redirect one onto another
+//! request because the challenge is derived from the request digest. It does
+//! still serve the page; see docs/threat-model.md.
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;

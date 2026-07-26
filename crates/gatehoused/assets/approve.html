@@ -24,6 +24,9 @@
   #status { min-height: 1.2em; font-size: .85rem; opacity: .8; margin: .5rem 0; }
   #enroll-box { margin-top: 2rem; padding-top: 1rem;
                 border-top: 1px solid rgba(128,128,128,.3); font-size: .9rem; }
+  .code { font-family: ui-monospace, monospace; font-size: 1.35rem;
+          letter-spacing: .14em; font-weight: 600; }
+  .code-line { margin-top: .5rem; font-size: .8rem; opacity: .8; }
 </style>
 </head>
 <body>
@@ -81,8 +84,12 @@ async function refresh() {
       card.innerHTML =
         '<div class="summary"></div>' +
         '<div class="meta">' + e.tier + ' · ' + e.harness + ' · ' +
-        e.age_secs + 's ago · ' + e.digest.slice(0, 8) + '</div>';
+        e.age_secs + 's ago</div>' +
+        '<div class="code-line">verification code ' +
+        '<span class="code"></span> — must match the code the daemon ' +
+        'terminal printed for this request</div>';
       card.querySelector('.summary').textContent = e.summary;
+      card.querySelector('.code').textContent = e.digest.slice(0, 8);
       const ok = document.createElement('button');
       ok.className = 'approve';
       ok.textContent = 'Approve with passkey';
@@ -101,8 +108,12 @@ async function refresh() {
 
 async function enroll() {
   try {
+    // Enrollment mints a new approver, so the daemon requires a one-time
+    // code the operator reads off their own terminal (`gate enroll-code`).
+    const code = prompt('Enrollment code (run `gate enroll-code` on the machine running gatehoused):');
+    if (!code) { say('Enrollment cancelled.'); return; }
     say('Follow the browser prompt…');
-    const { id, options } = await api('/api/register/start', {});
+    const { id, options } = await api('/api/register/start', { code });
     const pk = options.publicKey;
     pk.challenge = dec(pk.challenge);
     pk.user.id = dec(pk.user.id);
@@ -122,8 +133,12 @@ async function enroll() {
 
 async function approve(digest) {
   try {
-    say('Confirm with your authenticator…');
-    const { id, options } = await api('/api/approve/start', { digest });
+    // `code` comes back from the daemon, derived from the request it actually
+    // bound the ceremony to. Confirm it matches the daemon terminal before
+    // touching the authenticator — that is the out-of-band check against a
+    // relay that swapped the request.
+    const { id, options, code } = await api('/api/approve/start', { digest });
+    say('Code ' + code + ' — confirm it matches your terminal, then use your authenticator…');
     const pk = options.publicKey;
     pk.challenge = dec(pk.challenge);
     (pk.allowCredentials || []).forEach(c => c.id = dec(c.id));

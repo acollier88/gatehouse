@@ -91,7 +91,7 @@ fn dispatch(
 ) -> Result<serde_json::Value, String> {
     match method {
         RelayMethod::Pending => Ok(phone::pending_json(ctx)),
-        RelayMethod::RegisterStart => phone::register_start(phone, ctx),
+        RelayMethod::RegisterStart => phone::register_start(phone, ctx, body),
         RelayMethod::RegisterFinish => phone::register_finish(phone, ctx, body),
         RelayMethod::ApproveStart => phone::approve_start(phone, ctx, body),
         RelayMethod::ApproveFinish => {

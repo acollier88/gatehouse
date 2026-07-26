@@ -170,6 +170,26 @@ fi
 echo "== status reports"
 "$bin/gate" status | grep -q "gatehoused up" || fail "status output missing"
 
+echo "== passkey enrollment is gated by a one-time code (localhost page)"
+web_port="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_RUNTIME_DIR"]+"/http.json"))["port"])')"
+web_token="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_RUNTIME_DIR"]+"/http.json"))["token"])')"
+reg_start() {
+  curl -s -o /dev/null -w '%{http_code}' \
+    -H "X-Gatehouse-Token: $web_token" -H 'Content-Type: application/json' \
+    -d "$1" "http://localhost:${web_port}/api/register/start"
+}
+[ "$(reg_start '{}')" = "401" ] || fail "register/start without a code must be 401"
+[ "$(reg_start '{"code":"AAAAAAAA"}')" = "401" ] || fail "register/start with a bogus code must be 401"
+ec="$("$bin/gate" enroll-code | head -1 | awk '{print $3}')"
+[ -n "$ec" ] || fail "gate enroll-code printed no code"
+[ "$(reg_start "{\"code\":\"$ec\"}")" = "200" ] || fail "register/start with a valid code should start a ceremony"
+[ "$(reg_start "{\"code\":\"$ec\"}")" = "401" ] || fail "enrollment codes must be single use"
+
+echo "== the page token is required even with a valid enrollment code"
+code="$(curl -s -o /dev/null -w '%{http_code}' -H 'Content-Type: application/json' \
+  -d '{}' "http://localhost:${web_port}/api/register/start")"
+[ "$code" = "401" ] || fail "register/start without the page token should be 401, got $code"
+
 echo "== audit log is a linked chain with the expected decisions"
 audit="$GATEHOUSE_DATA_DIR/audit.jsonl"
 [ -s "$audit" ] || fail "audit log missing"
@@ -239,6 +259,25 @@ code="$(curl -sk -o /dev/null -w '%{http_code}' \
   -d '{"approved":true,"digest":"deadbeef"}' \
   "https://localhost:${phone_port}/api/approve/finish")"
 [ "$code" = "401" ] || fail "forged finish should be 401, got $code"
+
+echo "== phase 4: phone enrollment is gated by a one-time code"
+phone_reg() {
+  curl -sk -o /dev/null -w '%{http_code}' \
+    -H "X-Gatehouse-Token: $token" -H 'Content-Type: application/json' \
+    -d "$1" "https://localhost:${phone_port}/api/register/start"
+}
+[ "$(phone_reg '{}')" = "400" ] || fail "phone register/start without a code must fail"
+[ "$(phone_reg '{"code":"AAAAAAAA"}')" = "400" ] || fail "phone register/start with a bogus code must fail"
+ec="$("$bin/gate" enroll-code | head -1 | awk '{print $3}')"
+[ "$(phone_reg "{\"code\":\"$ec\"}")" = "200" ] || fail "phone register/start with a valid code should start a ceremony"
+[ "$(phone_reg "{\"code\":\"$ec\"}")" = "400" ] || fail "phone enrollment codes must be single use"
+
+echo "== phase 4: approve/start refuses a digest that is not pending"
+code="$(curl -sk -o /dev/null -w '%{http_code}' \
+  -H "X-Gatehouse-Token: $token" -H 'Content-Type: application/json' \
+  -d '{"digest":"deadbeef"}' \
+  "https://localhost:${phone_port}/api/approve/start")"
+[ "$code" = "400" ] || fail "approve/start on an unknown digest should fail, got $code"
 
 echo "== phase 4: killing relay mid-approval denies on timeout"
 (

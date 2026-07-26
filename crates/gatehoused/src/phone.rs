@@ -4,6 +4,11 @@
 //! id/origin come from relay config so a phone authenticator (Face ID, etc.)
 //! can enroll. Passkeys live in `passkeys-phone.json` separately from the
 //! localhost set — WebAuthn credentials are RP-bound.
+//!
+//! The relay is untrusted transport: the ceremony challenge is derived from
+//! the request (see [`crate::binding`]) and re-derived at release, so a relay
+//! that shows request A while starting a ceremony for request B produces an
+//! assertion that fails closed.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -15,6 +20,7 @@ use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::audit::now_unix;
+use crate::binding;
 use crate::Ctx;
 
 pub struct PhoneAuth {
@@ -64,7 +70,18 @@ pub fn pending_json(ctx: &Ctx) -> serde_json::Value {
     serde_json::json!({ "entries": entries, "enrolled": enrolled })
 }
 
-pub fn register_start(phone: &PhoneAuth, ctx: &Ctx) -> Result<serde_json::Value, String> {
+pub fn register_start(
+    phone: &PhoneAuth,
+    ctx: &Ctx,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // Enrolling mints a new approver, so the phone token alone is not enough:
+    // the operator must read a one-time code off their own terminal.
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    if !ctx.enroll_codes.redeem(code) {
+        warn!("phone enrollment refused: bad or expired enrollment code");
+        return Err("enrollment code invalid or expired (run `gate enroll-code`)".into());
+    }
     let exclude: Vec<CredentialID> = ctx
         .phone_passkeys
         .lock()
@@ -124,24 +141,30 @@ pub fn approve_start(
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing digest".to_string())?
         .to_string();
-    if !ctx.state.pending.lock().unwrap().contains_key(&digest) {
+    let Some(nonce) = ctx.state.pending_nonce(&digest) else {
         return Err("no such pending request".into());
-    }
+    };
     let creds = ctx.phone_passkeys.lock().unwrap().clone();
     if creds.is_empty() {
         return Err("no phone passkeys enrolled".into());
     }
-    let (rcr, state) = phone
+    let (mut rcr, state) = phone
         .webauthn
         .start_passkey_authentication(&creds)
         .map_err(|e| format!("auth start: {e}"))?;
+    let challenge = binding::derive_challenge(&digest, &nonce);
+    let state = binding::bind_challenge(&mut rcr, state, &challenge)?;
     let ceremony = Uuid::new_v4();
+    let code = binding::verification_code(&digest);
     phone
         .auth_states
         .lock()
         .unwrap()
         .insert(ceremony, (digest, state));
-    Ok(serde_json::json!({ "id": ceremony, "options": rcr }))
+    // `code` is computed here, from the request the daemon actually bound, so
+    // a relay that substitutes a digest gets back the substituted code and the
+    // human sees it disagree with the daemon terminal.
+    Ok(serde_json::json!({ "id": ceremony, "options": rcr, "code": code }))
 }
 
 #[derive(Deserialize)]
@@ -170,6 +193,18 @@ pub fn approve_finish(
             warn!("phone assertion rejected: {e}");
             format!("assertion rejected: {e}")
         })?;
+
+    // Re-derive from the request about to be released and compare against the
+    // challenge the authenticator signed. Fails closed, so the release does
+    // not rest on the in-memory ceremony→digest pairing alone.
+    let nonce = ctx
+        .state
+        .pending_nonce(&digest)
+        .ok_or_else(|| "no such pending request".to_string())?;
+    if let Err(e) = binding::check_bound(&body.cred, &digest, &nonce) {
+        warn!("phone assertion not bound to [{}]: {e}", &digest[..8]);
+        return Err(e);
+    }
 
     let (digest, pending) = ctx.state.take_pending(&digest)?;
     let now = now_unix();
