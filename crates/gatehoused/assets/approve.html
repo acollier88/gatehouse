@@ -108,8 +108,12 @@ async function refresh() {
 
 async function enroll() {
   try {
+    // Enrollment mints a new approver, so the daemon requires a one-time
+    // code the operator reads off their own terminal (`gate enroll-code`).
+    const code = prompt('Enrollment code (run `gate enroll-code` on the machine running gatehoused):');
+    if (!code) { say('Enrollment cancelled.'); return; }
     say('Follow the browser prompt…');
-    const { id, options } = await api('/api/register/start', {});
+    const { id, options } = await api('/api/register/start', { code });
     const pk = options.publicKey;
     pk.challenge = dec(pk.challenge);
     pk.user.id = dec(pk.user.id);

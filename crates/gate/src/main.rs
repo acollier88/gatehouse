@@ -57,9 +57,12 @@ enum Cmd {
     /// Show daemon status.
     Status,
     /// Open the approval page to enroll a passkey (Touch ID on macOS).
+    /// Prints a one-time enrollment code to type on the approval page.
     Enroll,
     /// Open the approval page to act on pending requests.
     Approvals,
+    /// Print a one-time code authorising one passkey enrollment.
+    EnrollCode,
     /// Harness hook adapters (reads hook JSON on stdin). Currently:
     /// `gate hook claude-code` for Claude Code PreToolUse.
     Hook { adapter: String },
@@ -107,7 +110,14 @@ async fn main() -> anyhow::Result<ExitCode> {
             ctl(CtlMsg::Grant { argv_glob, ttl_secs }).await
         }
         Cmd::Status => ctl(CtlMsg::Status).await,
-        Cmd::Enroll | Cmd::Approvals => open_approval_page(),
+        Cmd::Enroll => {
+            // Enrollment needs the code, so mint one before opening the page.
+            // A daemon that is not up is reported by open_approval_page.
+            let _ = ctl(CtlMsg::EnrollCode).await;
+            open_approval_page()
+        }
+        Cmd::Approvals => open_approval_page(),
+        Cmd::EnrollCode => ctl(CtlMsg::EnrollCode).await,
         Cmd::Hook { adapter } => match adapter.as_str() {
             "claude-code" => hook::run_claude_code().await,
             other => {
@@ -327,6 +337,11 @@ async fn ctl(msg: CtlMsg) -> anyhow::Result<ExitCode> {
                     e.harness
                 );
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        CtlResp::EnrollCode { code, ttl_secs } => {
+            println!("enrollment code: {code}  (valid {ttl_secs}s, single use)");
+            println!("type it on the approval page when enrolling a passkey");
             Ok(ExitCode::SUCCESS)
         }
         CtlResp::Status { version, pending, grants, uptime_secs } => {

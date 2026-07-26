@@ -2,6 +2,7 @@ mod audit;
 mod binding;
 mod certs;
 mod ctl;
+mod enroll;
 mod phone;
 mod policy;
 mod relay;
@@ -103,6 +104,8 @@ pub struct Ctx {
     pub http: OnceLock<web::HttpInfo>,
     /// Phone console URL when a relay is configured (`origin/?t=token`).
     pub phone_url: OnceLock<String>,
+    /// One-time codes gating passkey enrollment on both approval channels.
+    pub enroll_codes: enroll::EnrollCodes,
     pub auto_open: bool,
     audit: Mutex<Audit>,
 }
@@ -246,6 +249,7 @@ async fn run_daemon(args: Args) -> anyhow::Result<()> {
         phone_passkeys: Mutex::new(phone_passkeys),
         http: OnceLock::new(),
         phone_url: OnceLock::new(),
+        enroll_codes: enroll::EnrollCodes::default(),
         auto_open: !args.no_open,
         audit: Mutex::new(Audit::open(&paths::audit_path())?),
     });

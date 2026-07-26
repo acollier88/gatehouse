@@ -138,11 +138,24 @@ struct RegFinishBody {
     cred: RegisterPublicKeyCredential,
 }
 
+#[derive(Deserialize, Default)]
+struct RegStartBody {
+    #[serde(default)]
+    code: String,
+}
+
 async fn reg_start(
     State(web): State<Arc<WebCtx>>,
     headers: HeaderMap,
+    body: Option<Json<RegStartBody>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     authed(&web, &headers)?;
+    // Enrolling mints a new approver; the page token alone is not enough.
+    let code = body.map(|Json(b)| b.code).unwrap_or_default();
+    if !web.ctx.enroll_codes.redeem(&code) {
+        warn!("enrollment refused: bad or expired enrollment code");
+        return Err(StatusCode::UNAUTHORIZED);
+    }
     let exclude: Vec<CredentialID> = web
         .ctx
         .passkeys

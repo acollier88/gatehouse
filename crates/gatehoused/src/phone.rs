@@ -70,7 +70,18 @@ pub fn pending_json(ctx: &Ctx) -> serde_json::Value {
     serde_json::json!({ "entries": entries, "enrolled": enrolled })
 }
 
-pub fn register_start(phone: &PhoneAuth, ctx: &Ctx) -> Result<serde_json::Value, String> {
+pub fn register_start(
+    phone: &PhoneAuth,
+    ctx: &Ctx,
+    body: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    // Enrolling mints a new approver, so the phone token alone is not enough:
+    // the operator must read a one-time code off their own terminal.
+    let code = body.get("code").and_then(|v| v.as_str()).unwrap_or("");
+    if !ctx.enroll_codes.redeem(code) {
+        warn!("phone enrollment refused: bad or expired enrollment code");
+        return Err("enrollment code invalid or expired (run `gate enroll-code`)".into());
+    }
     let exclude: Vec<CredentialID> = ctx
         .phone_passkeys
         .lock()

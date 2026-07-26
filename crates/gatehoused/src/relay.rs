@@ -196,11 +196,12 @@ async fn api_pending(
 async fn api_register_start(
     State(state): State<Arc<RelayState>>,
     headers: HeaderMap,
+    body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     authed(&state, &headers)?;
-    Ok(Json(
-        rpc(&state, RelayMethod::RegisterStart, serde_json::json!({})).await?,
-    ))
+    // Carries the one-time enrollment code; the daemon validates it.
+    let body = body.map(|Json(v)| v).unwrap_or_else(|| serde_json::json!({}));
+    Ok(Json(rpc(&state, RelayMethod::RegisterStart, body).await?))
 }
 
 async fn api_register_finish(
