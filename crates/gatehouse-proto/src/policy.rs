@@ -92,7 +92,7 @@ impl Rule {
                             .file_name()
                             .map(|s| s.to_string_lossy().into_owned())
                             .unwrap_or_default();
-                        if !names.iter().any(|n| *n == base) {
+                        if !names.contains(&base) {
                             return false;
                         }
                     }

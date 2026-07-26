@@ -171,10 +171,7 @@ pub fn approve_finish(
             format!("assertion rejected: {e}")
         })?;
 
-    let (digest, pending) = ctx
-        .state
-        .take_pending(&digest)
-        .map_err(|e| e)?;
+    let (digest, pending) = ctx.state.take_pending(&digest)?;
     let now = now_unix();
     let assertion = serde_json::to_string(&body.cred).unwrap_or_default();
     let envelope = ApprovalEnvelope {
@@ -199,7 +196,7 @@ pub fn deny(ctx: &Ctx, body: serde_json::Value) -> Result<serde_json::Value, Str
         .get("digest")
         .and_then(|v| v.as_str())
         .ok_or_else(|| "missing digest".to_string())?;
-    let (digest, pending) = ctx.state.take_pending(digest).map_err(|e| e)?;
+    let (digest, pending) = ctx.state.take_pending(digest)?;
     let _ = pending.tx.send(None);
     Ok(serde_json::json!({ "denied": digest }))
 }

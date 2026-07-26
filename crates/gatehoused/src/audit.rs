@@ -25,8 +25,7 @@ impl Audit {
         let last_hash = match std::fs::read_to_string(path) {
             Ok(text) => text
                 .lines()
-                .filter(|l| !l.trim().is_empty())
-                .last()
+                .rfind(|l| !l.trim().is_empty())
                 .and_then(|line| serde_json::from_str::<Entry>(line).ok())
                 .map(|e| e.hash)
                 .unwrap_or_else(|| GENESIS.to_string()),
