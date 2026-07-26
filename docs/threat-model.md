@@ -56,9 +56,10 @@ is supplied by Gatehouse.
 
 **Still does not hold: the relay serves the page.** A relay that ships
 malicious PWA JavaScript controls what the human reads. It can show request
-A’s summary, call `/api/approve/start` for request A, and simply not tell the
-user — the binding is honest, but the human’s consent was obtained under a
-false description. Two things bound this:
+A’s summary while calling `/api/approve/start` for request B and suppress the
+on-screen code — the ceremony is self-consistently bound to B, but the
+human’s consent was obtained under a false description. Two things bound
+this:
 
 - `approve/start` returns a **verification code** — the first 8 hex of the
   digest the daemon actually bound the ceremony to — and the approval page
