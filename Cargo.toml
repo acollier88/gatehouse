@@ -1,6 +1,11 @@
 [workspace]
 resolver = "2"
-members = ["crates/gatehouse-proto", "crates/gatehoused", "crates/gate"]
+members = [
+    "crates/gatehouse-proto",
+    "crates/gatehoused",
+    "crates/gate",
+    "crates/gate-mcp",
+]
 
 [workspace.package]
 version = "0.1.0"

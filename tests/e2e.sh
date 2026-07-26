@@ -101,6 +101,72 @@ echo "== claude-code hook: non-workspace file write asks, ctl denial maps to den
 out="$(hookin Write '{"file_path":"/etc/hosts"}' | "$bin/gate" hook claude-code)"
 echo "$out" | grep -q '"permissionDecision":"deny"' || fail "denied file write should map to deny, got: $out"
 
+echo "== policy test dry-run"
+pt="$("$bin/gate" policy test -- git push origin main)"
+echo "$pt" | grep -q 'tier=ask-strong' \
+  || fail "policy test should resolve git push as ask-strong, got: $pt"
+
+echo "== gate-mcp stdio server gates exec through the broker"
+mcp="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}' \
+  '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+  '{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}' \
+  '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+  '{"jsonrpc":"2.0","id":3,"method":"tools/call","params":{"name":"gated_exec","arguments":{"argv":["echo","hello-mcp"]}}}' \
+  '{"jsonrpc":"2.0","id":4,"method":"tools/call","params":{"name":"gated_exec","arguments":{"argv":["sudo","ls"]}}}' \
+  | "$bin/gate-mcp" 2>/dev/null)"
+# Notifications carry no id and must draw no reply: 6 in, 4 out.
+[ "$(printf '%s\n' "$mcp" | wc -l | tr -d ' ')" = "4" ] \
+  || fail "notifications must not be answered; got: $mcp"
+printf '%s\n' "$mcp" | grep -q '"gated_fetch"' || fail "tools/list missing gated_fetch: $mcp"
+printf '%s\n' "$mcp" | grep -q 'hello-mcp' || fail "gated_exec should stream output: $mcp"
+printf '%s\n' "$mcp" | grep -q 'denied:' || fail "gated_exec sudo should be denied: $mcp"
+
+echo "== gate-mcp survives a Pending decision and streams after approval"
+# The daemon answers ask-tier with Decision{Pending} before the terminal
+# Decision{Allowed}; gate-mcp must keep reading rather than treating the
+# first Decision as final.
+(
+  for _ in $(seq 100); do
+    d="$("$bin/gate" pending | grep 'pending-mcp' | head -1 | sed 's/^\[\([0-9a-f]*\)\].*/\1/')"
+    if [ -n "$d" ]; then "$bin/gate" approve "$d" >/dev/null; exit 0; fi
+    sleep 0.1
+  done
+) &
+approver_pid=$!
+mcp_ask="$(printf '%s\n' \
+  '{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"gated_exec","arguments":{"argv":["true","pending-mcp"]}}}' \
+  | "$bin/gate-mcp" 2>/dev/null)"
+wait "$approver_pid" 2>/dev/null || true
+printf '%s\n' "$mcp_ask" | grep -q '"id":1' \
+  || fail "gate-mcp should answer after approval, got: $mcp_ask"
+# Must be the approved result, not a timeout denial — otherwise this would
+# pass even if gate-mcp stopped reading at the first Decision.
+printf '%s\n' "$mcp_ask" | grep -q 'exit 0' \
+  || fail "gate-mcp should report the child's exit after approval, got: $mcp_ask"
+if printf '%s\n' "$mcp_ask" | grep -q 'denied:'; then
+  fail "approved request must not come back denied: $mcp_ask"
+fi
+
+echo "== audit verify"
+av="$("$bin/gate" audit verify)"
+echo "$av" | grep -q 'chain intact' || fail "audit verify failed: $av"
+
+echo "== audit verify rejects a tampered body with intact linkage"
+tampered="$tmp/tampered.jsonl"
+python3 - "$GATEHOUSE_DATA_DIR/audit.jsonl" "$tampered" <<'PY'
+import json, sys
+lines = [json.loads(l) for l in open(sys.argv[1]) if l.strip()]
+target = next(i for i, e in enumerate(lines) if e["decision"] == "denied")
+lines[target]["decision"] = "approved"          # prev/hash left untouched
+with open(sys.argv[2], "w") as f:
+    for e in lines:
+        f.write(json.dumps(e) + "\n")
+PY
+if "$bin/gate" audit verify --path "$tampered" >/dev/null 2>&1; then
+  fail "audit verify must reject a body edited without rehashing"
+fi
+
 echo "== status reports"
 "$bin/gate" status | grep -q "gatehoused up" || fail "status output missing"
 

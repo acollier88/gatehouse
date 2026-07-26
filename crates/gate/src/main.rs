@@ -63,6 +63,34 @@ enum Cmd {
     /// Harness hook adapters (reads hook JSON on stdin). Currently:
     /// `gate hook claude-code` for Claude Code PreToolUse.
     Hook { adapter: String },
+    /// Audit log tools.
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
+    },
+    /// Policy dry-run tools.
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// Verify the append-only audit hash chain.
+    Verify {
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Resolve the policy tier for a command without executing it.
+    Test {
+        #[arg(trailing_var_arg = true, required = true)]
+        argv: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -87,7 +115,53 @@ async fn main() -> anyhow::Result<ExitCode> {
                 Ok(ExitCode::FAILURE)
             }
         },
+        Cmd::Audit { cmd } => match cmd {
+            AuditCmd::Verify { path } => audit_verify(path),
+        },
+        Cmd::Policy { cmd } => match cmd {
+            PolicyCmd::Test { argv } => policy_test(argv),
+        },
     }
+}
+
+fn audit_verify(path: Option<std::path::PathBuf>) -> anyhow::Result<ExitCode> {
+    let path = path.unwrap_or_else(paths::audit_path);
+    match gatehouse_proto::audit_log::verify_file(&path) {
+        Ok(n) => {
+            println!("ok: {} entries, chain intact ({})", n, path.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            eprintln!("audit verify failed: {e}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn policy_test(argv: Vec<String>) -> anyhow::Result<ExitCode> {
+    use gatehouse_proto::Policy;
+    let path = paths::policy_path();
+    let policy = if path.exists() {
+        Policy::load(&path)?
+    } else {
+        toml::from_str(gatehouse_proto::policy::DEFAULT_POLICY)
+            .context("parse default policy")?
+    };
+    let cwd = std::env::current_dir()?
+        .to_str()
+        .context("cwd")?
+        .to_string();
+    let request = GateRequest {
+        harness: "policy-test".into(),
+        session_id: "dry-run".into(),
+        env_allowlist: vec![],
+        op: Operation::Exec { argv, cwd },
+    };
+    let (tier, rule) = policy.resolve(&request);
+    println!("tier={tier} rule={rule}");
+    println!("summary={}", request.summary());
+    println!("digest={}", &request.digest()?[..16]);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Prefer the phone relay URL when configured; else the localhost page.

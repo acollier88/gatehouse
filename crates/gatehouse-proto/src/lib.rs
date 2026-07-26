@@ -5,13 +5,16 @@
 //! the CLI, and future signers (Touch ID, WebAuthn) can never disagree about
 //! what was approved.
 
+pub mod audit_log;
 pub mod envelope;
 pub mod paths;
+pub mod policy;
 pub mod relay;
 pub mod request;
 pub mod wire;
 
 pub use envelope::{ApprovalEnvelope, EnvelopeError, SigScheme};
+pub use policy::Policy;
 pub use relay::{DaemonToRelay, RelayConfig, RelayMethod, RelayToDaemon};
 pub use request::{GateRequest, Operation};
 pub use wire::{

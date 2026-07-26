@@ -16,7 +16,7 @@ Early development. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap.
 - [x] Phase 2 — passkey (WebAuthn) approval (localhost Touch ID / platform authenticator)
 - [x] Phase 3 — Claude Code adapter (PreToolUse hook)
 - [x] Phase 4 — phone approval (WebAuthn PWA + self-hosted mTLS relay)
-- [ ] Phase 5 — MCP gateway adapter, audit tooling, threat-model docs
+- [x] Phase 5 — MCP gateway, `gate audit verify` / `policy test`, threat model
 - [ ] Phase 6 — hosted / integrator relay (stable phone RP without Tailscale)
 - [ ] Phase 7 — more harness adapters (Cursor, Codex, OpenCode, Pi, …)
 - [ ] Phase 8 — Windows + Linux support for `gatehoused` / `gate`
@@ -119,6 +119,17 @@ not a Gatehouse bug.
 
 APNs / ntfy can only *notify* you that something is pending. They are not the
 approval channel — the passkey assertion over HTTPS is.
+
+## CLI polish
+
+```sh
+gate policy test -- git push origin main   # dry-run tier resolution
+gate audit verify                          # hash-chain check
+```
+
+MCP: [adapters/mcp-gateway/README.md](adapters/mcp-gateway/README.md)  
+Threat model: [docs/threat-model.md](docs/threat-model.md)  
+Container recipe: [docker-compose.yml](docker-compose.yml)
 
 ## Layout
 
