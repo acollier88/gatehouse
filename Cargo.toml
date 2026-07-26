@@ -34,7 +34,11 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 axum = { version = "0.8", features = ["ws"] }
 axum-server = { version = "0.7", features = ["tls-rustls"] }
-webauthn-rs = "0.5"
+# danger-allow-state-serialisation lets the daemon rewrite the ceremony
+# challenge inside `PasskeyAuthentication` so it is derived from the request
+# digest instead of being random. No crypto is reimplemented.
+webauthn-rs = { version = "0.5", features = ["danger-allow-state-serialisation"] }
+subtle = "2"
 uuid = { version = "1", features = ["v4", "serde"] }
 url = "2"
 rcgen = "0.13"

@@ -136,7 +136,12 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
             let short = &digest[..8];
             if tier == Tier::AskStrong && ctx.passkeys_enrolled() {
                 if let Some(url) = ctx.approval_url() {
-                    warn!("APPROVAL NEEDED [{short}] {summary} — passkey required: {url}");
+                    // `short` is the verification code the approval page
+                    // shows; the human compares the two.
+                    warn!(
+                        "APPROVAL NEEDED [{short}] {summary} — passkey required; \
+                         confirm the approval page shows code {short}: {url}"
+                    );
                     if ctx.auto_open {
                         open_browser(&url);
                     }
@@ -286,16 +291,11 @@ fn open_browser(url: &str) {
     }
 }
 
+/// Unpredictable per pending approval: the nonce feeds the derived WebAuthn
+/// ceremony challenge, so guessing it would let a challenge be precomputed.
 fn new_nonce() -> String {
-    // Unique per pending approval; uniqueness matters, unpredictability will
-    // matter once envelopes are signed by external devices (phase 2+), at
-    // which point this moves to a CSPRNG.
-    format!(
-        "{}-{}",
-        now_unix(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .subsec_nanos()
-    )
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }

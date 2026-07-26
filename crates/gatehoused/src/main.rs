@@ -1,4 +1,5 @@
 mod audit;
+mod binding;
 mod certs;
 mod ctl;
 mod phone;

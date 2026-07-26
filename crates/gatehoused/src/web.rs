@@ -1,14 +1,11 @@
 //! Localhost approval page: passkey enrollment and WebAuthn-attested
 //! approvals for `ask-strong` requests.
 //!
-//! Binding model: webauthn-rs mints a random challenge per ceremony; the
-//! daemon maps that ceremony (in memory, single process) to exactly one
-//! pending request digest, and the page shows the canonical summary for that
-//! digest. The assertion therefore attests "a human touched the
-//! authenticator for *this* ceremony", and the daemon — the party verifying
-//! and releasing — is the same party that bound ceremony → digest. When the
-//! relay arrives (phase 4) the challenge itself will carry the envelope so
-//! binding survives an untrusted transport.
+//! Binding model: the ceremony challenge is derived from the pending request
+//! (see [`crate::binding`]) rather than random, and re-derived at release from
+//! the request being released. The page is served by the daemon itself here,
+//! so the transport is trusted — but the mechanism is shared with the phone
+//! relay path and must behave identically.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -20,11 +17,13 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use gatehouse_proto::{paths, ApprovalEnvelope, SigScheme};
 use serde::{Deserialize, Serialize};
+use subtle::ConstantTimeEq;
 use tracing::{info, warn};
 use uuid::Uuid;
 use webauthn_rs::prelude::*;
 
 use crate::audit::now_unix;
+use crate::binding;
 use crate::Ctx;
 
 /// How the daemon advertises the approval page to `gate`.
@@ -98,15 +97,16 @@ fn new_token() -> String {
     hex::encode(bytes)
 }
 
-/// Constant-ish time comparison is overkill for a 256-bit random token on
-/// loopback, but the check must never be skippable: every API route calls
-/// this first.
+/// Constant-time so the token cannot be recovered a byte at a time, and never
+/// skippable: every API route calls this first.
 fn authed(web: &WebCtx, headers: &HeaderMap) -> Result<(), StatusCode> {
     let presented = headers
         .get("x-gatehouse-token")
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
-    if presented == web.token {
+    let ok = presented.len() == web.token.len()
+        && bool::from(presented.as_bytes().ct_eq(web.token.as_bytes()));
+    if ok {
         Ok(())
     } else {
         Err(StatusCode::UNAUTHORIZED)
@@ -209,33 +209,34 @@ async fn auth_start(
     Json(body): Json<DigestBody>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     authed(&web, &headers)?;
-    if !web
-        .ctx
-        .state
-        .pending
-        .lock()
-        .unwrap()
-        .contains_key(&body.digest)
-    {
+    let Some(nonce) = web.ctx.state.pending_nonce(&body.digest) else {
         return Err(StatusCode::NOT_FOUND);
-    }
+    };
     let creds = web.ctx.passkeys.lock().unwrap().clone();
     if creds.is_empty() {
         return Err(StatusCode::PRECONDITION_FAILED);
     }
-    let (rcr, state) = web
+    let (mut rcr, state) = web
         .webauthn
         .start_passkey_authentication(&creds)
         .map_err(|e| {
             warn!("auth start failed: {e}");
             StatusCode::INTERNAL_SERVER_ERROR
         })?;
+    let challenge = binding::derive_challenge(&body.digest, &nonce);
+    let state = binding::bind_challenge(&mut rcr, state, &challenge).map_err(|e| {
+        warn!("challenge binding failed: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
     let ceremony = Uuid::new_v4();
+    let code = binding::verification_code(&body.digest);
     web.auth_states
         .lock()
         .unwrap()
         .insert(ceremony, (body.digest, state));
-    Ok(Json(serde_json::json!({ "id": ceremony, "options": rcr })))
+    Ok(Json(
+        serde_json::json!({ "id": ceremony, "options": rcr, "code": code }),
+    ))
 }
 
 async fn auth_finish(
@@ -257,6 +258,18 @@ async fn auth_finish(
             warn!("assertion rejected: {e}");
             StatusCode::UNAUTHORIZED
         })?;
+
+    // Re-derive from the request about to be released; fail closed on
+    // mismatch rather than trusting the in-memory ceremony→digest pairing.
+    let nonce = web
+        .ctx
+        .state
+        .pending_nonce(&digest)
+        .ok_or(StatusCode::NOT_FOUND)?;
+    if let Err(e) = binding::check_bound(&body.cred, &digest, &nonce) {
+        warn!("assertion not bound to [{}]: {e}", &digest[..8]);
+        return Err(StatusCode::UNAUTHORIZED);
+    }
 
     let (digest, pending) = web
         .ctx
