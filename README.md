@@ -55,11 +55,36 @@ page; `gate enroll` registers a platform passkey (Touch ID on Apple silicon).
 
 ```sh
 gatehoused --no-open          # terminal 1
-gate enroll                   # enroll Touch ID once
+gate enroll                   # prints a one-time code and opens the page
 gate run -- git push          # ask-strong → Touch ID on this Mac
 ```
 
 No extra networking. Push notifications and phones are not involved.
+
+### Enrolling a passkey (both channels)
+
+Enrollment mints a new approver, so the approval URL alone is not enough:
+`register/start` requires a **one-time enrollment code**. `gate enroll` prints
+one and opens the page; `gate enroll-code` prints one on demand (e.g. when the
+page is already open on a phone).
+
+```sh
+gate enroll-code
+# enrollment code: K7QW3MTZ  (valid 300s, single use)
+```
+
+Type it into the prompt on the approval page, then complete the authenticator
+gesture. Codes are CSPRNG-generated, single-use and expire after 5 minutes;
+anyone who has the phone URL but not your terminal cannot enroll.
+
+### Verification code on approval
+
+When you approve, the page shows a **verification code** — the same 8
+characters the daemon prints in its `APPROVAL NEEDED [xxxxxxxx]` line. The
+WebAuthn challenge is derived from the request itself, so the daemon refuses
+to release anything the assertion was not bound to; the code is the
+out-of-band check that the request on screen is the one your terminal is
+waiting on. Confirm they match before you touch the sensor.
 
 ### 2. Phone via self-hosted relay
 
@@ -90,7 +115,8 @@ gatehoused relay               # terminal 1
 gatehoused --relay-url https://<your-host>:8788 --no-open   # terminal 2
 ```
 
-Open the printed phone URL **in the phone’s browser**, enroll, then
+Open the printed phone URL **in the phone’s browser**, run `gate enroll-code`
+on the machine and type the code into the page to enroll, then
 `gate run -- git push`.
 
 Details: [docs/relay.md](docs/relay.md). Future integrator-hosted endpoints

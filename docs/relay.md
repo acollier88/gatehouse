@@ -51,8 +51,15 @@ gatehoused --relay-url https://box.tailnet.ts.net:8788
 - **8787** — phone HTTPS (PWA). Auth: `?t=` / `X-Gatehouse-Token`.
 - **8788** — daemon mTLS WebSocket at `/ws`. Client certificate required.
 
-Open the phone URL **on the phone** (Safari/Chrome). Enroll a passkey there,
-then trigger an `ask-strong` op (`gate run -- git push`).
+Open the phone URL **on the phone** (Safari/Chrome). Tap "Enroll a passkey";
+the page asks for a one-time enrollment code, which you get by running
+`gate enroll-code` on the machine running `gatehoused` (8 characters, single
+use, valid 5 minutes). Then trigger an `ask-strong` op
+(`gate run -- git push`).
+
+When approving, the card shows a **verification code** — the first 8 hex of
+the request digest, the same value the daemon prints as
+`APPROVAL NEEDED [xxxxxxxx]`. Check they match before you use the sensor.
 
 `gate enroll` prefers the relay URL once `relay-init` has run; on a phone that
 is correct. On the Mac localhost page, prefer Touch ID — do **not** use the
@@ -69,8 +76,9 @@ by the daemon.
 |-------|--------|
 | Relay killed mid-approval | Daemon times out → deny |
 | Relay sends `{approved:true}` without assertion | HTTP 401; pending untouched |
-| Relay swaps digests | Daemon ceremony map + envelope binding reject mismatch |
-| Token leaked | Attacker can see pending summaries / start ceremonies; still cannot mint a valid authenticator assertion |
+| Relay swaps digests | Challenge is derived from `{digest, nonce}`; the daemon re-derives it from the request it is releasing and rejects a mismatch |
+| Relay serves hostile page JS | Not prevented — it can misdescribe the request. The verification code shown by the daemon vs. the terminal is the human's check; a pinned client is the real fix |
+| Token leaked | Attacker can see pending summaries / start ceremonies; still cannot mint a valid authenticator assertion, and cannot enroll one without a `gate enroll-code` code |
 
 Localhost Touch ID enrollments (`passkeys.json`) and phone enrollments
 (`passkeys-phone.json`) are separate — WebAuthn credentials are RP-bound.
