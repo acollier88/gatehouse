@@ -4,19 +4,38 @@
 # Agent: only the mounted socket is available for side effects — use
 # `gate run` / gate-mcp inside the container.
 #
-#   docker compose run --rm agent
+#   docker compose run --rm build     # once: needs crates.io, gets no socket
+#   docker compose run --rm agent     # no network, socket only
+#
+# The build is a separate service on purpose: compiling needs crates.io, and
+# the agent must have no network at all. Giving the agent both would defeat
+# the point of the recipe.
 services:
-  agent:
+  build:
     image: rust:1-bookworm
     working_dir: /work
     volumes:
+      - ./:/work
+      - gatehouse-bin:/out
+    command: cargo install --locked --path crates/gate --root /out
+
+  agent:
+    image: debian:bookworm-slim
+    working_dir: /work
+    depends_on:
+      build:
+        condition: service_completed_successfully
+    volumes:
       - ./:/work:ro
+      - gatehouse-bin:/out:ro
       # Host runtime dir (adjust path / GATEHOUSE_RUNTIME_DIR as needed)
       - ${GATEHOUSE_RUNTIME_DIR:-${HOME}/.gatehouse/run}:/gatehouse/run:rw
     environment:
       GATEHOUSE_RUNTIME_DIR: /gatehouse/run
+      PATH: /out/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     # No network: force all interesting work through the broker socket.
     network_mode: none
-    command: >
-      bash -lc "cargo install --path crates/gate --root /tmp/gh &&
-      /tmp/gh/bin/gate run -- echo hello-from-container"
+    command: gate run -- echo hello-from-container
+
+volumes:
+  gatehouse-bin:
