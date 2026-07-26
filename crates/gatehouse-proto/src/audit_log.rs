@@ -108,8 +108,91 @@ pub fn verify_text(text: &str) -> Result<usize, VerifyError> {
 mod tests {
     use super::*;
 
+    /// Build a well-formed two-entry chain.
+    fn chain() -> Vec<Entry> {
+        let mut prev = GENESIS.to_string();
+        let mut out = Vec::new();
+        for (digest, decision, tier) in [
+            ("d1", "allowed", Tier::Allow),
+            ("d2", "denied", Tier::AskStrong),
+        ] {
+            let mut e = Entry {
+                ts: 1_700_000_000,
+                digest: digest.into(),
+                summary: format!("Run `{digest}`"),
+                tier,
+                decision: decision.into(),
+                rule: "r".into(),
+                prev: prev.clone(),
+                hash: String::new(),
+            };
+            e.hash = entry_hash(&e).unwrap();
+            prev = e.hash.clone();
+            out.push(e);
+        }
+        out
+    }
+
+    fn to_text(entries: &[Entry]) -> String {
+        entries
+            .iter()
+            .map(|e| serde_json::to_string(e).unwrap())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
     #[test]
     fn empty_file_ok() {
         assert_eq!(verify_text("").unwrap(), 0);
+    }
+
+    #[test]
+    fn intact_chain_verifies() {
+        assert_eq!(verify_text(&to_text(&chain())).unwrap(), 2);
+    }
+
+    #[test]
+    fn tampered_body_fails_even_though_linkage_is_intact() {
+        // The attack that linkage-only checking misses: rewrite a decision in
+        // place and leave the `prev`/`hash` fields untouched.
+        let mut entries = chain();
+        entries[1].decision = "approved".into();
+        assert_eq!(entries[1].prev, entries[0].hash, "linkage still looks fine");
+        match verify_text(&to_text(&entries)) {
+            Err(VerifyError::HashMismatch { line }) => assert_eq!(line, 2),
+            other => panic!("tampered body must fail verification, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn tampered_first_entry_fails() {
+        let mut entries = chain();
+        entries[0].summary = "Run `something else`".into();
+        match verify_text(&to_text(&entries)) {
+            Err(VerifyError::HashMismatch { line }) => assert_eq!(line, 1),
+            other => panic!("expected hash mismatch on line 1, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn broken_linkage_fails() {
+        let mut entries = chain();
+        entries[1].prev = "0".repeat(64);
+        match verify_text(&to_text(&entries)) {
+            Err(VerifyError::Broken { line, .. }) => assert_eq!(line, 2),
+            other => panic!("expected broken chain, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn removing_the_first_entry_fails() {
+        let entries = chain();
+        match verify_text(&to_text(&entries[1..])) {
+            Err(VerifyError::Broken { line, expected, .. }) => {
+                assert_eq!(line, 1);
+                assert_eq!(expected, GENESIS);
+            }
+            other => panic!("expected broken chain, got {other:?}"),
+        }
     }
 }
