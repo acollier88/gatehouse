@@ -42,7 +42,6 @@ struct PendingRpc {
 }
 
 struct DaemonLink {
-    device_id: String,
     outbound: mpsc::UnboundedSender<String>,
     rpcs: HashMap<String, PendingRpc>,
 }
@@ -334,8 +333,21 @@ async fn daemon_ws_mtls(
     State(state): State<Arc<RelayState>>,
     ws: WebSocketUpgrade,
 ) -> impl axum::response::IntoResponse {
-    // Legacy single-tenant key until Hello supplies a device_id.
+    // An mTLS client cert proves possession of the single shared CA key, not
+    // of any device token, so this channel *is* the legacy single-tenant
+    // identity — full stop. Multi-device routing requires the token listener.
     ws.on_upgrade(move |socket| handle_daemon(state, socket, devices::MTLS_DEVICE.to_string()))
+}
+
+/// Identity is a property of the authenticated channel, never of the Hello.
+/// A daemon claiming a different `device_id` is logged and ignored, so an
+/// mTLS connection cannot take over an enrolled device's route (and a
+/// token connection cannot leave its own).
+fn hello_identity(authenticated: &str, claimed: Option<&str>) -> String {
+    if let Some(id) = claimed.filter(|id| !id.is_empty() && *id != authenticated) {
+        warn!("ignoring hello device_id {id}: channel is authenticated as {authenticated}");
+    }
+    authenticated.to_string()
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -348,7 +360,7 @@ fn bearer_token(headers: &HeaderMap) -> Option<String> {
     }
 }
 
-async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, mut device_id: String) {
+async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, device_id: String) {
     let (mut sink, mut stream) = socket.split();
     let (tx, mut rx) = mpsc::unbounded_channel::<String>();
 
@@ -367,7 +379,6 @@ async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, mut device_id:
         guard.insert(
             device_id.clone(),
             DaemonLink {
-                device_id: device_id.clone(),
                 outbound: tx,
                 rpcs: HashMap::new(),
             },
@@ -391,23 +402,7 @@ async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, mut device_id:
                     enrolled,
                     device_id: hello_id,
                 }) => {
-                    if let Some(id) = hello_id {
-                        if device_id == devices::MTLS_DEVICE && id != devices::MTLS_DEVICE {
-                            let mut guard = state.daemons.lock().await;
-                            if let Some(link) = guard.remove(devices::MTLS_DEVICE) {
-                                if guard.contains_key(&id) {
-                                    warn!("hello device_id {id} already connected; keeping _mtls");
-                                    guard.insert(devices::MTLS_DEVICE.into(), link);
-                                } else {
-                                    let mut link = link;
-                                    link.device_id = id.clone();
-                                    device_id = id.clone();
-                                    guard.insert(id.clone(), link);
-                                    info!("daemon remapped _mtls → {id}");
-                                }
-                            }
-                        }
-                    }
+                    let device_id = hello_identity(&device_id, hello_id.as_deref());
                     info!("daemon hello device={device_id}; phone passkeys enrolled: {enrolled}");
                 }
                 Ok(DaemonToRelay::RpcOk { id, body }) => {
@@ -445,3 +440,29 @@ async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, mut device_id:
     warn!("daemon disconnected ({device_id})");
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// S4: an mTLS connection presents the shared CA client cert, not a device
+    /// token, so a Hello claiming an enrolled device_id must not move its route.
+    #[test]
+    fn hello_cannot_remap_the_mtls_channel() {
+        assert_eq!(
+            hello_identity(devices::MTLS_DEVICE, Some("dev_victim")),
+            devices::MTLS_DEVICE
+        );
+        assert_eq!(
+            hello_identity(devices::MTLS_DEVICE, None),
+            devices::MTLS_DEVICE
+        );
+    }
+
+    #[test]
+    fn hello_cannot_move_a_token_channel_either() {
+        assert_eq!(hello_identity("dev_aaa", Some("dev_bbb")), "dev_aaa");
+        assert_eq!(hello_identity("dev_aaa", Some("dev_aaa")), "dev_aaa");
+        assert_eq!(hello_identity("dev_aaa", Some("")), "dev_aaa");
+        assert_eq!(hello_identity("dev_aaa", None), "dev_aaa");
+    }
+}
