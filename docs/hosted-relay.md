@@ -43,8 +43,20 @@ gatehoused relay --listen 0.0.0.0:8787 --daemon-listen 0.0.0.0:8788
 # Enroll each broker machine (writes devices.json on the relay host)
 gatehoused device-enroll --label laptop \
   --endpoint https://approve.example.com:8787 --write
-# → device.json (copy to the laptop) + phone URL with &d=device_id
+# → device.json (copy to the laptop) + that device's own phone URL
 ```
+
+Each enrollment mints **two** CSPRNG secrets scoped to that device alone:
+
+| Secret | Presented as | Purpose |
+|--------|--------------|---------|
+| `token` | `Authorization: Bearer` on the daemon `/ws` | Authenticates that broker's control-plane socket |
+| `phone_token` | `X-Gatehouse-Token` / `?t=` | Authenticates that device's phone |
+
+Nothing is shared between devices. The relay-wide `phone_token` in relay
+`config.json` is *not* a tenant credential: it authorizes only the legacy
+single-tenant mTLS link, and presenting it against an enrolled `device_id`
+is rejected with 403.
 
 On the **broker machine** (after copying `device.json` into the data dir, or
 writing `~/.config/gatehouse/relay.toml`):
@@ -63,9 +75,21 @@ gatehoused --relay-url https://approve.example.com:8787 \
   --relay-token <token> --no-open
 ```
 
-Phone opens `https://approve.example.com:8787/?t=<phone_token>&d=<device_id>`.
-The `d=` query (or `X-Gatehouse-Device`) pins API calls to that broker so two
-enrolled daemons cannot approve each other’s requests.
+Phone opens `https://approve.example.com:8787/?t=<device phone_token>&d=<device_id>`
+— the URL `device-enroll` prints, carrying that device's own bearer.
+
+**The token selects the device; `d=` only cross-checks it.** The relay derives
+the target broker from the presented `phone_token` (constant-time scan of
+`devices.json`) and then requires any `d=` query or `X-Gatehouse-Device` header
+to name that same device. So:
+
+- Device A's phone token addressing device B → **403**, on every route.
+- Device A's phone token with no `d=` at all → still device A, never a
+  fallback to "whichever broker happens to be connected".
+- An unknown token → **401**.
+
+A tenant therefore cannot read another tenant's pending summaries, deny their
+requests, or aim a passkey enrollment at their daemon.
 
 `daemon_auth` in relay `config.json`:
 
@@ -75,6 +99,11 @@ enrolled daemons cannot approve each other’s requests.
 | `token` | Bearer WS on phone port `/ws` only (`--hosted`) |
 | `both` | Accept either |
 
+The mTLS listener is single-tenant by construction. A client cert proves
+possession of the shared CA-signed key, not of any device token, so an mTLS
+connection is always the `_mtls` identity — its `Hello` cannot claim an
+enrolled `device_id`. Multi-device routing requires the token listener.
+
 ## Multi-tenant responsibilities
 
 | Party | Holds | Must not |
@@ -82,6 +111,11 @@ enrolled daemons cannot approve each other’s requests.
 | Integrator relay | Routing, push fan-out, TLS for the phone origin, `devices.json` | Private keys for user passkeys; ability to mint valid assertions |
 | User broker (`gatehoused`) | Passkeys, policy, audit log, ceremony verify | Blindly trust relay “approved” flags |
 | Phone | Platform authenticator | Treat push payload as authorization |
+
+`devices.json` holds every tenant's bearer secrets in cleartext (0600), and
+pending-request summaries pass through the relay as cleartext RPC. Per-device
+tokens isolate tenants **from each other**, not from the relay operator — see
+the hosted-mode section of [threat-model.md](threat-model.md).
 
 Changing RP ID (Tailscale → hosted, or between hosts) always means **re-enroll**
 phone passkeys. `relay-init --force` already warns.
@@ -92,8 +126,13 @@ Minimum viable hosted relay (compatible with this binary’s token mode):
 
 - Terminate HTTPS for a stable hostname (RP ID).
 - Authenticate daemons with enrollment tokens (`Authorization: Bearer`).
-- Map `device_id →` live control-plane connection; route phone API by `d=`.
-- Proxy the Phase 4 RPC methods (`pending`, register/*, approve/*, deny).
+- Map `device_id →` live control-plane connection.
+- Route the phone API by **deriving the device from the phone bearer**, not
+  from `d=`. Treat `d=` as a cross-check that must agree, and compare tokens
+  in constant time.
+- Proxy the Phase 4 RPC methods (`pending`, register/*, approve/*, deny)
+  unmodified — the daemon enforces enrollment codes and challenge binding on
+  the far side, and a relay that rewrites bodies only breaks itself.
 - Serve the approval PWA (or embed in a native shell).
 - Optional: Web Push / APNs — still not an approval.
 

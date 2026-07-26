@@ -44,7 +44,11 @@ gatehoused device-enroll --label laptop --write \
   --endpoint https://approve.example.com:8787
 ```
 
-See [hosted-relay.md](hosted-relay.md).
+Each `device-enroll` mints that device its **own** phone bearer alongside its
+control-plane token, and prints a phone URL carrying it
+(`/?t=<device phone_token>&d=<device_id>`). The relay-wide `phone_token` in
+`config.json` stays with the single-tenant mTLS path only. See
+[hosted-relay.md](hosted-relay.md).
 
 ## Run
 
@@ -56,8 +60,12 @@ gatehoused relay --listen 0.0.0.0:8787 --daemon-listen 0.0.0.0:8788
 gatehoused --relay-url https://box.tailnet.ts.net:8788
 ```
 
-- **8787** — phone HTTPS (PWA). Auth: `?t=` / `X-Gatehouse-Token`.
+- **8787** — phone HTTPS (PWA). Auth: `?t=` / `X-Gatehouse-Token`. In hosted
+  mode this port also carries the daemon WebSocket at `/ws`, authenticated
+  with `Authorization: Bearer <device token>`.
 - **8788** — daemon mTLS WebSocket at `/ws`. Client certificate required.
+  Single-tenant: this channel is always the `_mtls` identity regardless of
+  what its `Hello` claims.
 
 Open the phone URL **on the phone** (Safari/Chrome). Tap "Enroll a passkey";
 the page asks for a one-time enrollment code, which you get by running
@@ -87,6 +95,7 @@ by the daemon.
 | Relay swaps digests | Challenge is derived from `{digest, nonce}`; the daemon re-derives it from the request it is releasing and rejects a mismatch |
 | Relay serves hostile page JS | Not prevented — it can misdescribe the request. The verification code shown by the daemon vs. the terminal is the human's check; a pinned client is the real fix |
 | Token leaked | Attacker can see pending summaries / start ceremonies; still cannot mint a valid authenticator assertion, and cannot enroll one without a `gate enroll-code` code |
+| One tenant's phone token leaked (hosted) | Blast radius is that one device. The token *is* the device selector, so it cannot address another tenant's broker (403), and it cannot fall through to whichever broker happens to be connected |
 
 Localhost Touch ID enrollments (`passkeys.json`) and phone enrollments
 (`passkeys-phone.json`) are separate — WebAuthn credentials are RP-bound.
