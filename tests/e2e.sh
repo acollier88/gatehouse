@@ -253,7 +253,10 @@ curl -skf -H "X-Gatehouse-Token: $token" \
   "https://localhost:${phone_port}/api/pending" >/dev/null \
   || fail "relay/daemon not ready: $(tail -n 20 "$tmp/relay.log" "$tmp/daemon-relay.log")"
 
-echo "== phase 4: forged approval without WebAuthn assertion is rejected"
+# Shape check only: no `cred` key -> 401 before the daemon is asked. The
+# assertion itself (signature + request binding) is covered by the binding
+# unit tests, not by this.
+echo "== phase 4: a finish body with no assertion is rejected at the relay"
 code="$(curl -sk -o /dev/null -w '%{http_code}' \
   -H "X-Gatehouse-Token: $token" -H 'Content-Type: application/json' \
   -d '{"approved":true,"digest":"deadbeef"}' \
@@ -315,10 +318,31 @@ echo "== phase 6: hosted relay-init + device token dial-out"
   --daemon-listen "127.0.0.1:0" \
   --force --yes >/dev/null
 
-"$bin/gatehoused" device-enroll --label e2e \
+# Two tenants on one relay. Only device A gets a daemon; B exists to prove
+# that holding B's credentials cannot reach A.
+"$bin/gatehoused" device-enroll --label tenant-a \
   --endpoint "https://localhost:${hosted_port}" --write >/dev/null
-device_id="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/device.json"))["device_id"])')"
-token="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/relay/config.json"))["phone_token"])')"
+"$bin/gatehoused" device-enroll --label tenant-b \
+  --endpoint "https://localhost:${hosted_port}" >/dev/null
+
+dev_field() {
+  python3 -c 'import json,os,sys
+recs=json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/relay/devices.json"))
+rec=next(r for r in recs if r["label"]==sys.argv[1])
+print(rec[sys.argv[2]])' "$1" "$2"
+}
+device_a="$(dev_field tenant-a device_id)"
+phone_a="$(dev_field tenant-a phone_token)"
+device_b="$(dev_field tenant-b device_id)"
+phone_b="$(dev_field tenant-b phone_token)"
+relay_token="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/relay/config.json"))["phone_token"])')"
+
+[ "$phone_a" != "$phone_b" ] || fail "devices must not share a phone token"
+[ "$phone_a" != "$relay_token" ] || fail "device phone token must not be the relay-wide token"
+# device.json is what the broker copies to the laptop; it must carry the
+# device's own phone bearer, not the relay-wide one.
+cred_phone="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_DATA_DIR"]+"/device.json"))["phone_token"])')"
+[ "$cred_phone" = "$phone_a" ] || fail "device.json must carry the device-scoped phone token"
 
 "$bin/gatehoused" relay \
   --listen "127.0.0.1:${hosted_port}" \
@@ -331,31 +355,88 @@ relay_pid=$!
   >"$tmp/daemon-hosted.log" 2>&1 &
 daemon_pid=$!
 
+# Status code only: these checks are about who the relay lets in, not payloads.
+hosted() { curl -sk -o /dev/null -w '%{http_code}' "$@"; }
+
 for _ in $(seq 80); do
   if [ -S "$GATEHOUSE_RUNTIME_DIR/agent.sock" ] \
-    && curl -skf -H "X-Gatehouse-Token: $token" -H "X-Gatehouse-Device: $device_id" \
-         "https://localhost:${hosted_port}/api/pending?d=${device_id}" >/dev/null 2>&1; then
+    && curl -skf -H "X-Gatehouse-Token: $phone_a" \
+         "https://localhost:${hosted_port}/api/pending?d=${device_a}" >/dev/null 2>&1; then
     break
   fi
   sleep 0.1
 done
-curl -skf -H "X-Gatehouse-Token: $token" -H "X-Gatehouse-Device: $device_id" \
-  "https://localhost:${hosted_port}/api/pending?d=${device_id}" >/dev/null \
+curl -skf -H "X-Gatehouse-Token: $phone_a" \
+  "https://localhost:${hosted_port}/api/pending?d=${device_a}" >/dev/null \
   || fail "hosted relay/daemon not ready: $(tail -n 30 "$tmp/relay-hosted.log" "$tmp/daemon-hosted.log")"
 
-echo "== phase 6: unknown device is unavailable"
-code="$(curl -sk -o /dev/null -w '%{http_code}' \
-  -H "X-Gatehouse-Token: $token" -H 'X-Gatehouse-Device: dev_missing' \
-  "https://localhost:${hosted_port}/api/pending?d=dev_missing")"
-[ "$code" = "503" ] || fail "missing device should be 503, got $code"
+echo "== phase 6: the phone token alone selects the device (no ?d= needed)"
+code="$(hosted -H "X-Gatehouse-Token: $phone_a" \
+  "https://localhost:${hosted_port}/api/pending")"
+[ "$code" = "200" ] || fail "device A's token should reach device A, got $code"
 
-echo "== phase 6: forged approval still rejected"
-code="$(curl -sk -o /dev/null -w '%{http_code}' \
-  -H "X-Gatehouse-Token: $token" -H "X-Gatehouse-Device: $device_id" \
+echo "== phase 6: device A's token cannot address device B (cross-tenant)"
+code="$(hosted -H "X-Gatehouse-Token: $phone_a" \
+  "https://localhost:${hosted_port}/api/pending?d=${device_b}")"
+[ "$code" = "403" ] || fail "A reading B's pending list should be 403, got $code"
+code="$(hosted -H "X-Gatehouse-Token: $phone_a" -H 'Content-Type: application/json' \
+  -d '{}' "https://localhost:${hosted_port}/api/register/start?d=${device_b}")"
+[ "$code" = "403" ] || fail "A enrolling against B should be 403, got $code"
+code="$(hosted -H "X-Gatehouse-Token: $phone_a" -H 'Content-Type: application/json' \
+  -d '{"digest":"deadbeef"}' "https://localhost:${hosted_port}/api/deny?d=${device_b}")"
+[ "$code" = "403" ] || fail "A denying B's request should be 403, got $code"
+code="$(hosted -H "X-Gatehouse-Token: $phone_a" -H "X-Gatehouse-Device: ${device_b}" \
+  "https://localhost:${hosted_port}/api/pending")"
+[ "$code" = "403" ] || fail "A addressing B via header should be 403, got $code"
+
+echo "== phase 6: device B's token never falls through to device A's daemon"
+# B has no connected broker. Before per-device tokens this returned A's
+# pending list; now it can only ever resolve to B, which is 503.
+code="$(hosted -H "X-Gatehouse-Token: $phone_b" \
+  "https://localhost:${hosted_port}/api/pending")"
+[ "$code" = "503" ] || fail "device B alone should be 503 (not A's pending), got $code"
+code="$(hosted -H "X-Gatehouse-Token: $phone_b" \
+  "https://localhost:${hosted_port}/api/pending?d=${device_a}")"
+[ "$code" = "403" ] || fail "B addressing A should be 403, got $code"
+
+echo "== phase 6: the relay-wide phone token no longer reaches an enrolled device"
+code="$(hosted -H "X-Gatehouse-Token: $relay_token" \
+  "https://localhost:${hosted_port}/api/pending?d=${device_a}")"
+[ "$code" = "403" ] || fail "relay token must not address a device, got $code"
+# Without ?d= it resolves to the legacy mTLS link, which is not connected here.
+code="$(hosted -H "X-Gatehouse-Token: $relay_token" \
+  "https://localhost:${hosted_port}/api/pending")"
+[ "$code" = "503" ] || fail "relay token should resolve to the mTLS link only, got $code"
+
+echo "== phase 6: an unknown phone token is rejected"
+code="$(hosted -H "X-Gatehouse-Token: not-a-real-token" \
+  "https://localhost:${hosted_port}/api/pending?d=${device_a}")"
+[ "$code" = "401" ] || fail "unknown token should be 401, got $code"
+
+echo "== phase 6: enrollment through the hosted path still needs a one-time code"
+hosted_reg() {
+  hosted -H "X-Gatehouse-Token: $phone_a" -H 'Content-Type: application/json' \
+    -d "$1" "https://localhost:${hosted_port}/api/register/start?d=${device_a}"
+}
+[ "$(hosted_reg '{}')" = "400" ] || fail "hosted register/start without a code must fail"
+[ "$(hosted_reg '{"code":"AAAAAAAA"}')" = "400" ] || fail "hosted register/start with a bogus code must fail"
+ec="$("$bin/gate" enroll-code | head -1 | awk '{print $3}')"
+[ -n "$ec" ] || fail "gate enroll-code printed no code"
+[ "$(hosted_reg "{\"code\":\"$ec\"}")" = "200" ] || fail "hosted register/start with a valid code should start a ceremony"
+[ "$(hosted_reg "{\"code\":\"$ec\"}")" = "400" ] || fail "hosted enrollment codes must be single use"
+
+echo "== phase 6: a finish body with no assertion is rejected at the relay"
+code="$(hosted -H "X-Gatehouse-Token: $phone_a" \
   -H 'Content-Type: application/json' \
   -d '{"approved":true,"digest":"deadbeef"}' \
-  "https://localhost:${hosted_port}/api/approve/finish?d=${device_id}")"
-[ "$code" = "401" ] || fail "forged finish should be 401, got $code"
+  "https://localhost:${hosted_port}/api/approve/finish?d=${device_a}")"
+[ "$code" = "401" ] || fail "assertion-less finish should be 401, got $code"
+
+echo "== phase 6: approve/start on an unknown digest fails through the hosted path"
+code="$(hosted -H "X-Gatehouse-Token: $phone_a" \
+  -H 'Content-Type: application/json' -d '{"digest":"deadbeef"}' \
+  "https://localhost:${hosted_port}/api/approve/start?d=${device_a}")"
+[ "$code" = "400" ] || fail "approve/start on an unknown digest should fail, got $code"
 
 echo
 echo "ALL E2E TESTS PASSED"

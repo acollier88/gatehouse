@@ -229,6 +229,9 @@ async fn connect_once(
     Ok(())
 }
 
+/// One dispatch for both transports: hosted/token traffic gets exactly the
+/// enrollment-code and challenge-binding checks the mTLS path gets, because
+/// there is no second code path to forget them in.
 fn dispatch(
     ctx: &Arc<Ctx>,
     phone: &PhoneAuth,
@@ -247,5 +250,167 @@ fn dispatch(
             phone::approve_finish(phone, ctx, body)
         }
         RelayMethod::Deny => phone::deny(ctx, body),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::{Mutex, OnceLock};
+    use std::time::{Duration, Instant};
+
+    use gatehouse_proto::{GateRequest, Operation, RelayConfig, Tier};
+    use webauthn_rs::prelude::Passkey;
+
+    use crate::state::{Pending, Shared};
+
+    fn b64(bytes: &[u8]) -> String {
+        use base64::Engine;
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(bytes)
+    }
+
+    /// A credential record shaped like one webauthn-rs would have stored. Only
+    /// its presence matters here: `approve_start` refuses to begin a ceremony
+    /// with no enrolled phone passkey.
+    fn synthetic_passkey() -> Passkey {
+        serde_json::from_value(serde_json::json!({
+            "cred": {
+                "cred_id": b64(&[1u8; 16]),
+                "cred": {
+                    "type_": "ES256",
+                    "key": { "EC_EC2": {
+                        "curve": "SECP256R1",
+                        "x": b64(&[2u8; 32]),
+                        "y": b64(&[3u8; 32]),
+                    }},
+                },
+                "counter": 0,
+                "transports": null,
+                "user_verified": true,
+                "backup_eligible": false,
+                "backup_state": false,
+                "registration_policy": "required",
+                "extensions": {},
+                "attestation": { "data": "None", "metadata": "None" },
+                "attestation_format": "none",
+            }
+        }))
+        .expect("passkey shape")
+    }
+
+    fn relay_config() -> RelayConfig {
+        RelayConfig {
+            rp_id: "localhost".into(),
+            origin: "https://localhost:8787".into(),
+            phone_token: "t".into(),
+            listen: String::new(),
+            daemon_listen: String::new(),
+            transport: Some("hosted".into()),
+            daemon_auth: Some("token".into()),
+        }
+    }
+
+    /// Ctx with one pending ask-strong request and one enrolled phone passkey.
+    fn ctx_with_pending() -> (Arc<Ctx>, String, String) {
+        let dir = std::env::temp_dir().join(format!("gatehouse-test-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let ctx = Arc::new(Ctx {
+            policy: toml::from_str(crate::policy::DEFAULT_POLICY).unwrap(),
+            state: Shared::default(),
+            approval_timeout: Duration::from_secs(30),
+            passkeys: Mutex::new(vec![]),
+            phone_passkeys: Mutex::new(vec![synthetic_passkey()]),
+            http: OnceLock::new(),
+            phone_url: OnceLock::new(),
+            enroll_codes: crate::enroll::EnrollCodes::default(),
+            auto_open: false,
+            audit: Mutex::new(crate::audit::Audit::open(&dir.join("audit.jsonl")).unwrap()),
+        });
+
+        let request = GateRequest {
+            harness: "test".into(),
+            session_id: "s1".into(),
+            env_allowlist: vec![],
+            op: Operation::Exec {
+                argv: vec!["git".into(), "push".into()],
+                cwd: "/tmp".into(),
+            },
+        };
+        let digest = request.digest().unwrap();
+        let nonce = "nonce-for-test".to_string();
+        let (tx, _rx) = tokio::sync::oneshot::channel();
+        ctx.state.pending.lock().unwrap().insert(
+            digest.clone(),
+            Pending {
+                request,
+                tier: Tier::AskStrong,
+                nonce: nonce.clone(),
+                submitted: Instant::now(),
+                tx,
+            },
+        );
+        (ctx, digest, nonce)
+    }
+
+    /// The hosted path must return the daemon-computed verification code, and
+    /// the challenge it hands the phone must be the one derived from the
+    /// request — otherwise hosted mode would quietly lose PR #5's binding.
+    #[test]
+    fn approve_start_over_the_hosted_dispatch_is_bound_and_carries_the_code() {
+        let (ctx, digest, nonce) = ctx_with_pending();
+        let phone = PhoneAuth::new(&relay_config()).unwrap();
+        let out = dispatch(
+            &ctx,
+            &phone,
+            RelayMethod::ApproveStart,
+            serde_json::json!({ "digest": digest }),
+        )
+        .expect("approve start");
+
+        assert_eq!(out["code"], serde_json::json!(&digest[..8]));
+        let expected = crate::binding::derive_challenge(&digest, &nonce);
+        assert_eq!(
+            out["options"]["publicKey"]["challenge"],
+            serde_json::json!(b64(&expected)),
+        );
+    }
+
+    /// Enrollment gating is not bypassed by going through the relay dispatch.
+    #[test]
+    fn register_start_over_the_hosted_dispatch_still_needs_a_code() {
+        let (ctx, _digest, _nonce) = ctx_with_pending();
+        let phone = PhoneAuth::new(&relay_config()).unwrap();
+        assert!(dispatch(&ctx, &phone, RelayMethod::RegisterStart, serde_json::json!({})).is_err());
+        assert!(dispatch(
+            &ctx,
+            &phone,
+            RelayMethod::RegisterStart,
+            serde_json::json!({ "code": "AAAAAAAA" })
+        )
+        .is_err());
+        let code = ctx.enroll_codes.issue();
+        assert!(dispatch(
+            &ctx,
+            &phone,
+            RelayMethod::RegisterStart,
+            serde_json::json!({ "code": code })
+        )
+        .is_ok());
+    }
+
+    /// A finish body with no assertion never reaches pending state.
+    #[test]
+    fn approve_finish_over_the_hosted_dispatch_rejects_a_bodyless_forge() {
+        let (ctx, digest, _nonce) = ctx_with_pending();
+        let phone = PhoneAuth::new(&relay_config()).unwrap();
+        let err = dispatch(
+            &ctx,
+            &phone,
+            RelayMethod::ApproveFinish,
+            serde_json::json!({ "approved": true, "digest": digest.clone() }),
+        )
+        .expect_err("bodyless finish must fail");
+        assert!(err.contains("forged approval"));
+        assert!(ctx.state.pending.lock().unwrap().contains_key(&digest));
     }
 }
