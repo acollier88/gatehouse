@@ -30,7 +30,6 @@ use axum::{Json, Router};
 use futures_util::{SinkExt, StreamExt};
 use gatehouse_proto::{DaemonToRelay, RelayMethod, RelayToDaemon};
 use serde::Deserialize;
-use subtle::ConstantTimeEq;
 use tokio::sync::{mpsc, oneshot, Mutex};
 use tracing::{info, warn};
 use uuid::Uuid;
@@ -144,22 +143,6 @@ self.addEventListener('message', e => {
     )
 }
 
-/// Constant-time: the phone token is a bearer secret on a public listener.
-fn phone_authed(state: &RelayState, headers: &HeaderMap) -> Result<(), StatusCode> {
-    let presented = headers
-        .get("x-gatehouse-token")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("");
-    let expected = state.material.config.phone_token.as_bytes();
-    let ok = presented.len() == expected.len()
-        && bool::from(presented.as_bytes().ct_eq(expected));
-    if ok {
-        Ok(())
-    } else {
-        Err(StatusCode::UNAUTHORIZED)
-    }
-}
-
 fn device_from_headers(headers: &HeaderMap) -> Option<String> {
     headers
         .get("x-gatehouse-device")
@@ -173,22 +156,42 @@ struct DeviceQuery {
     d: Option<String>,
 }
 
-async fn resolve_device(
+/// Authorize a phone call and return the device it may address.
+///
+/// The presented bearer *is* the device selector — `?d=` / `X-Gatehouse-Device`
+/// only cross-check it — so device A's phone token can never reach device B.
+/// Comparisons are constant-time over every enrolled record.
+fn phone_device(
     state: &RelayState,
     headers: &HeaderMap,
     query: &DeviceQuery,
 ) -> Result<String, StatusCode> {
-    if let Some(d) = query.d.as_ref().filter(|s| !s.is_empty()) {
-        return Ok(d.clone());
-    }
-    if let Some(d) = device_from_headers(headers) {
-        return Ok(d);
-    }
-    let guard = state.daemons.lock().await;
-    match guard.len() {
-        0 => Err(StatusCode::SERVICE_UNAVAILABLE),
-        1 => Ok(guard.keys().next().unwrap().clone()),
-        _ => Err(StatusCode::CONFLICT),
+    let presented = headers
+        .get("x-gatehouse-token")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("");
+    let requested = query
+        .d
+        .clone()
+        .filter(|s| !s.is_empty())
+        .or_else(|| device_from_headers(headers));
+    let enrolled = devices::load_devices().map_err(|e| {
+        warn!("device store unreadable: {e}");
+        StatusCode::INTERNAL_SERVER_ERROR
+    })?;
+    match devices::authorize_phone(
+        &enrolled,
+        &state.material.config.phone_token,
+        presented,
+        requested.as_deref(),
+    ) {
+        devices::Authz::Device(id) => Ok(id),
+        devices::Authz::LegacyMtls => Ok(devices::MTLS_DEVICE.to_string()),
+        devices::Authz::WrongDevice => {
+            warn!("phone token addressed a device it does not own");
+            Err(StatusCode::FORBIDDEN)
+        }
+        devices::Authz::Unauthenticated => Err(StatusCode::UNAUTHORIZED),
     }
 }
 
@@ -239,8 +242,7 @@ async fn api_pending(
     headers: HeaderMap,
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    phone_authed(&state, &headers)?;
-    let device = resolve_device(&state, &headers, &query).await?;
+    let device = phone_device(&state, &headers, &query)?;
     Ok(Json(
         rpc(&state, &device, RelayMethod::Pending, serde_json::json!({})).await?,
     ))
@@ -252,8 +254,7 @@ async fn api_register_start(
     Query(query): Query<DeviceQuery>,
     body: Option<Json<serde_json::Value>>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    phone_authed(&state, &headers)?;
-    let device = resolve_device(&state, &headers, &query).await?;
+    let device = phone_device(&state, &headers, &query)?;
     // Carries the one-time enrollment code; the daemon validates it.
     let body = body.map(|Json(v)| v).unwrap_or_else(|| serde_json::json!({}));
     Ok(Json(
@@ -267,8 +268,7 @@ async fn api_register_finish(
     Query(query): Query<DeviceQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    phone_authed(&state, &headers)?;
-    let device = resolve_device(&state, &headers, &query).await?;
+    let device = phone_device(&state, &headers, &query)?;
     Ok(Json(
         rpc(&state, &device, RelayMethod::RegisterFinish, body).await?,
     ))
@@ -280,8 +280,7 @@ async fn api_approve_start(
     Query(query): Query<DeviceQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    phone_authed(&state, &headers)?;
-    let device = resolve_device(&state, &headers, &query).await?;
+    let device = phone_device(&state, &headers, &query)?;
     Ok(Json(
         rpc(&state, &device, RelayMethod::ApproveStart, body).await?,
     ))
@@ -293,8 +292,7 @@ async fn api_approve_finish(
     Query(query): Query<DeviceQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    phone_authed(&state, &headers)?;
-    let device = resolve_device(&state, &headers, &query).await?;
+    let device = phone_device(&state, &headers, &query)?;
     if crate::phone::reject_unauthenticated_release(&body) {
         return Err(StatusCode::UNAUTHORIZED);
     }
@@ -311,8 +309,7 @@ async fn api_deny(
     Query(query): Query<DeviceQuery>,
     Json(body): Json<serde_json::Value>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
-    phone_authed(&state, &headers)?;
-    let device = resolve_device(&state, &headers, &query).await?;
+    let device = phone_device(&state, &headers, &query)?;
     Ok(Json(rpc(&state, &device, RelayMethod::Deny, body).await?))
 }
 
@@ -338,7 +335,7 @@ async fn daemon_ws_mtls(
     ws: WebSocketUpgrade,
 ) -> impl axum::response::IntoResponse {
     // Legacy single-tenant key until Hello supplies a device_id.
-    ws.on_upgrade(move |socket| handle_daemon(state, socket, "_mtls".into()))
+    ws.on_upgrade(move |socket| handle_daemon(state, socket, devices::MTLS_DEVICE.to_string()))
 }
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
@@ -395,12 +392,12 @@ async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, mut device_id:
                     device_id: hello_id,
                 }) => {
                     if let Some(id) = hello_id {
-                        if device_id == "_mtls" && id != "_mtls" {
+                        if device_id == devices::MTLS_DEVICE && id != devices::MTLS_DEVICE {
                             let mut guard = state.daemons.lock().await;
-                            if let Some(link) = guard.remove("_mtls") {
+                            if let Some(link) = guard.remove(devices::MTLS_DEVICE) {
                                 if guard.contains_key(&id) {
                                     warn!("hello device_id {id} already connected; keeping _mtls");
-                                    guard.insert("_mtls".into(), link);
+                                    guard.insert(devices::MTLS_DEVICE.into(), link);
                                 } else {
                                     let mut link = link;
                                     link.device_id = id.clone();
@@ -447,3 +444,4 @@ async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, mut device_id:
     }
     warn!("daemon disconnected ({device_id})");
 }
+

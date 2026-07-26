@@ -66,10 +66,19 @@ pub struct RelayConfig {
 }
 
 /// One enrolled broker device allowed to dial the hosted/self-hosted relay.
+///
+/// Two independent secrets, both CSPRNG and both scoped to this device alone:
+/// `token` authenticates the broker's control-plane WebSocket, `phone_token`
+/// authenticates that device's phone. Neither is shared between tenants — a
+/// shared phone token would let any tenant address any other tenant's broker.
 #[derive(Serialize, Deserialize, Clone, Debug)]
 pub struct DeviceRecord {
     pub device_id: String,
     pub token: String,
+    /// Phone bearer for this device. Deliberately not `#[serde(default)]`:
+    /// a devices.json written before per-device tokens must fail loudly
+    /// rather than load with an empty (unauthenticatable) secret.
+    pub phone_token: String,
     #[serde(default)]
     pub label: String,
     pub created_at: i64,
@@ -84,7 +93,8 @@ pub struct DeviceCred {
     pub endpoint: String,
     pub rp_id: String,
     pub origin: String,
-    /// Phone bearer so the daemon can surface `origin/?t=…&d=…`.
+    /// This device's own phone bearer, so the daemon can surface
+    /// `origin/?t=…&d=…`. Never the relay-wide phone token.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phone_token: Option<String>,
 }
