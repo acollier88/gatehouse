@@ -15,7 +15,9 @@ pub mod wire;
 
 pub use envelope::{ApprovalEnvelope, EnvelopeError, SigScheme};
 pub use policy::Policy;
-pub use relay::{DaemonToRelay, RelayConfig, RelayMethod, RelayToDaemon};
+pub use relay::{
+    DaemonToRelay, DeviceCred, DeviceRecord, RelayConfig, RelayMethod, RelayToDaemon, RelayToml,
+};
 pub use request::{GateRequest, Operation};
 pub use wire::{
     AgentMsg, CtlMsg, CtlResp, DaemonMsg, DecisionStatus, GrantInfo, PendingEntry, Tier,

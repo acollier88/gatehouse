@@ -18,7 +18,7 @@
 | `gate` / hooks / `gate-mcp` | Untrusted relative to policy — they only submit |
 | Harness (Claude Code, Codex, Cursor, …) | Untrusted; may ignore advisory hooks |
 | Phone / localhost approval UI | Trusted only for user-presence gestures |
-| Relay (self-hosted or hosted) | Transport — cannot forge an approval and cannot redirect one at the API level; **can** serve hostile page JavaScript (see below) |
+| Relay (self-hosted or hosted) | Transport — cannot forge an approval and cannot redirect one at the API level; **can** serve hostile page JavaScript and **does** see every pending summary in cleartext (see below) |
 
 ## Relay: what is actually guaranteed today
 
@@ -74,6 +74,37 @@ this:
 The full fix is a client the relay does not get to author — a native or
 pinned app rendering the summary itself. That is a later phase; until then,
 **self-host the relay** and use the code comparison when the request matters.
+
+## Hosted mode: what tenant isolation does and does not buy
+
+One relay can carry several brokers (`gatehoused device-enroll`). Each enrolled
+device gets two CSPRNG secrets of its own: a control-plane `token` for its
+WebSocket and a `phone_token` for its phone. Nothing is shared. On every phone
+API route the relay derives the target device *from the presented
+`phone_token`* — a constant-time scan of `devices.json` — and treats `?d=` /
+`X-Gatehouse-Device` only as a cross-check that must agree. Tenant A's phone
+therefore cannot read tenant B's pending summaries, deny B's requests, or aim
+a passkey enrollment at B's daemon; it gets 403. The relay-wide `phone_token`
+in relay `config.json` authorizes the legacy single-tenant mTLS link and
+nothing else. The mTLS listener is likewise single-tenant by construction: a
+client cert proves possession of the shared CA-signed key, not of a device
+token, so that channel's identity is fixed and its `Hello` cannot claim
+another device.
+
+**This isolates tenants from each other, not from the relay operator.**
+Pending-request summaries — the command line, the file path, the host —
+cross the relay as cleartext JSON RPC, so whoever runs the relay reads every
+tenant's summaries and sees the timing of every approval. `devices.json` holds
+every tenant's bearer secrets in cleartext on the relay host (0600), so relay
+host compromise is total for routing: the attacker can impersonate any phone
+and any broker's control plane. What that still does not buy is an approval —
+releasing a request needs a WebAuthn assertion the *daemon* verifies against an
+enrolled passkey, bound to the request digest, and enrolling a new passkey
+needs a one-time code off the operator's own terminal. A hostile relay's
+leverage remains what it is for the single-tenant case: deceiving the human
+through the page it serves.
+
+If summaries are sensitive, self-host the relay.
 
 ## Enrollment
 

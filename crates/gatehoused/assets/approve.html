@@ -38,7 +38,9 @@
   <button id="enroll-btn">Enroll a passkey</button>
 </div>
 <script>
-const token = new URLSearchParams(location.search).get('t');
+const params = new URLSearchParams(location.search);
+const token = params.get('t');
+const device = params.get('d');
 const statusEl = document.getElementById('status');
 
 function say(msg, isErr) {
@@ -46,10 +48,18 @@ function say(msg, isErr) {
   statusEl.style.color = isErr ? '#dc2626' : '';
 }
 
+function withDevice(path) {
+  if (!device) return path;
+  const join = path.includes('?') ? '&' : '?';
+  return path + join + 'd=' + encodeURIComponent(device);
+}
+
 async function api(path, body) {
-  const r = await fetch(path, {
+  const headers = { 'X-Gatehouse-Token': token, 'Content-Type': 'application/json' };
+  if (device) headers['X-Gatehouse-Device'] = device;
+  const r = await fetch(withDevice(path), {
     method: body === undefined ? 'GET' : 'POST',
-    headers: { 'X-Gatehouse-Token': token, 'Content-Type': 'application/json' },
+    headers,
     body: body === undefined ? undefined : JSON.stringify(body),
   });
   if (!r.ok) throw new Error(path + ' -> HTTP ' + r.status);
