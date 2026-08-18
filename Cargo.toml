@@ -48,3 +48,4 @@ tokio-rustls = "0.26"
 tokio-tungstenite = { version = "0.26", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
 webpki-roots = "0.26"
+aes-gcm = "0.10"

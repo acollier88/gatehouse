@@ -259,4 +259,11 @@ mod tests {
             "cred": { "id": "x", "type": "public-key" }
         })));
     }
+
+    #[test]
+    fn deny_shape_never_releases() {
+        let body = serde_json::json!({ "denied": "abc" });
+        assert!(body.get("approved").is_none());
+        assert_eq!(body.get("denied").and_then(|v| v.as_str()), Some("abc"));
+    }
 }

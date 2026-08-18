@@ -44,6 +44,13 @@ pub enum DaemonToRelay {
     },
     RpcOk { id: String, body: Value },
     RpcErr { id: String, message: String },
+    /// Best-effort awareness only. Must never be treated as authorization.
+    PendingEvent {
+        digest_prefix: String,
+        summary: String,
+        tier: String,
+        harness: String,
+    },
 }
 
 /// Persisted relay bootstrap (certs live beside this file).

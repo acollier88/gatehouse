@@ -207,24 +207,42 @@ async fn connect_once(
     sink.send(Message::Text(hello.into())).await?;
     info!("relay connected");
 
-    while let Some(msg) = stream.next().await {
-        let msg = msg?;
-        let Message::Text(text) = msg else { continue };
-        let req: RelayToDaemon = match serde_json::from_str(&text) {
-            Ok(r) => r,
-            Err(e) => {
-                warn!("bad relay rpc: {e}");
-                continue;
+    let mut wake_rx = ctx.pending_wake.subscribe();
+    loop {
+        tokio::select! {
+            msg = stream.next() => {
+                let Some(msg) = msg else { break };
+                let msg = msg?;
+                let Message::Text(text) = msg else { continue };
+                let req: RelayToDaemon = match serde_json::from_str(&text) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("bad relay rpc: {e}");
+                        continue;
+                    }
+                };
+                let RelayToDaemon::Rpc { id, method, body } = req;
+                let reply = dispatch(&ctx, &phone, method, body);
+                let out = match reply {
+                    Ok(body) => DaemonToRelay::RpcOk { id, body },
+                    Err(message) => DaemonToRelay::RpcErr { id, message },
+                };
+                sink.send(Message::Text(serde_json::to_string(&out)?.into()))
+                    .await?;
             }
-        };
-        let RelayToDaemon::Rpc { id, method, body } = req;
-        let reply = dispatch(&ctx, &phone, method, body);
-        let out = match reply {
-            Ok(body) => DaemonToRelay::RpcOk { id, body },
-            Err(message) => DaemonToRelay::RpcErr { id, message },
-        };
-        sink.send(Message::Text(serde_json::to_string(&out)?.into()))
-            .await?;
+            wake = wake_rx.recv() => {
+                if let Ok(w) = wake {
+                    let out = DaemonToRelay::PendingEvent {
+                        digest_prefix: w.digest_prefix,
+                        summary: w.summary,
+                        tier: w.tier,
+                        harness: w.harness,
+                    };
+                    sink.send(Message::Text(serde_json::to_string(&out)?.into()))
+                        .await?;
+                }
+            }
+        }
     }
     Ok(())
 }
@@ -325,6 +343,7 @@ mod tests {
             enroll_codes: crate::enroll::EnrollCodes::default(),
             auto_open: false,
             audit: Mutex::new(crate::audit::Audit::open(&dir.join("audit.jsonl")).unwrap()),
+            pending_wake: tokio::sync::broadcast::channel(8).0,
         });
 
         let request = GateRequest {

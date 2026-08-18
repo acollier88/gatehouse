@@ -36,3 +36,4 @@ tokio-rustls.workspace = true
 tokio-tungstenite.workspace = true
 futures-util.workspace = true
 webpki-roots.workspace = true
+aes-gcm.workspace = true

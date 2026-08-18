@@ -74,6 +74,7 @@ pub async fn run(listen: SocketAddr, daemon_listen: SocketAddr) -> anyhow::Resul
         .route("/api/approve/start", post(api_approve_start))
         .route("/api/approve/finish", post(api_approve_finish))
         .route("/api/deny", post(api_deny))
+        .route("/api/devices/apns", post(api_apns_register).delete(api_apns_delete))
         .route("/ws", get(daemon_ws_token))
         .with_state(state.clone());
 
@@ -312,6 +313,35 @@ async fn api_deny(
     Ok(Json(rpc(&state, &device, RelayMethod::Deny, body).await?))
 }
 
+#[derive(Deserialize)]
+struct ApnsBody {
+    token: String,
+    #[serde(default)]
+    device_id: Option<String>,
+}
+
+async fn api_apns_register(
+    State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
+    Query(query): Query<DeviceQuery>,
+    Json(body): Json<ApnsBody>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let device = phone_device(&state, &headers, &query)?;
+    let id = body.device_id.unwrap_or(device);
+    let hash = crate::apns::register(&id, &body.token).map_err(|_| StatusCode::BAD_REQUEST)?;
+    Ok(Json(serde_json::json!({ "registered": true, "token_hash": hash })))
+}
+
+async fn api_apns_delete(
+    State(state): State<Arc<RelayState>>,
+    headers: HeaderMap,
+    Query(query): Query<DeviceQuery>,
+) -> Result<Json<serde_json::Value>, StatusCode> {
+    let device = phone_device(&state, &headers, &query)?;
+    let removed = crate::apns::unregister(&device).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    Ok(Json(serde_json::json!({ "removed": removed })))
+}
+
 async fn daemon_ws_token(
     State(state): State<Arc<RelayState>>,
     headers: HeaderMap,
@@ -420,6 +450,13 @@ async fn handle_daemon(state: Arc<RelayState>, socket: WebSocket, device_id: Str
                             let _ = tx.send(Err(message));
                         }
                     }
+                }
+                Ok(DaemonToRelay::PendingEvent {
+                    digest_prefix,
+                    summary,
+                    ..
+                }) => {
+                    crate::apns::fanout_pending(&digest_prefix, &summary);
                 }
                 Err(e) => warn!("bad daemon message: {e}"),
             }
