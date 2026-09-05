@@ -1,3 +1,4 @@
+mod apns;
 mod audit;
 mod binding;
 mod certs;
@@ -145,6 +146,16 @@ pub struct Ctx {
     pub enroll_codes: enroll::EnrollCodes,
     pub auto_open: bool,
     audit: Mutex<Audit>,
+    /// Best-effort APNs wake. Subscribers (relay client) must not treat this as approval.
+    pub pending_wake: tokio::sync::broadcast::Sender<PendingWake>,
+}
+
+#[derive(Clone, Debug)]
+pub struct PendingWake {
+    pub digest_prefix: String,
+    pub summary: String,
+    pub tier: String,
+    pub harness: String,
 }
 
 impl Ctx {
@@ -328,6 +339,7 @@ async fn run_daemon(args: Args) -> anyhow::Result<()> {
         enroll_codes: enroll::EnrollCodes::default(),
         auto_open: !args.no_open,
         audit: Mutex::new(Audit::open(&paths::audit_path())?),
+        pending_wake: tokio::sync::broadcast::channel(32).0,
     });
 
     let started = Instant::now();

@@ -133,6 +133,12 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
             }
             ctx.audit(&digest, &summary, tier, "pending", &rule);
             send(w, &decision(DecisionStatus::Pending)).await;
+            let _ = ctx.pending_wake.send(crate::PendingWake {
+                digest_prefix: digest[..8].to_string(),
+                summary: summary.clone(),
+                tier: format!("{tier:?}").to_ascii_lowercase(),
+                harness: request.harness.clone(),
+            });
             let short = &digest[..8];
             if tier == Tier::AskStrong && ctx.passkeys_enrolled() {
                 if let Some(url) = ctx.approval_url() {
