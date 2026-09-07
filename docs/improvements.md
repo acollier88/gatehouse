@@ -202,8 +202,9 @@ commands.
 - [x] **PR #4 rework**: merged as `cf29c1f` — S3/S4/S5/S7 closed; enrollment
       codes and challenge binding proven through hosted mode; two-tenant
       isolation e2e in both directions.
-- [ ] **PR #1 (parked)**: verify the Codex hooks surface actually exists;
-      document OpenCode fail-open; rebase.
+- [x] **PR #1 (parked)**: Codex `PreToolUse` confirmed in official hooks
+      docs (nested `hooks.PreToolUse`, deny via exit 2); installer writes
+      that shape; OpenCode fail-open documented; rebased onto current main.
 - [ ] **PR #2 (parked)**: rebase onto post-#3 layout (policy now lives in
       gatehouse-proto); apply constant-time treatment to the TCP IPC
       `AUTH <token>` line.

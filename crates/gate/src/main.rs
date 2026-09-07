@@ -63,8 +63,8 @@ enum Cmd {
     Approvals,
     /// Print a one-time code authorising one passkey enrollment.
     EnrollCode,
-    /// Harness hook adapters (reads hook JSON on stdin). Currently:
-    /// `gate hook claude-code` for Claude Code PreToolUse.
+    /// Harness hook adapters (reads hook JSON on stdin):
+    /// `claude-code`, `codex`, or `generic`.
     Hook { adapter: String },
     /// Audit log tools.
     Audit {
@@ -118,13 +118,7 @@ async fn main() -> anyhow::Result<ExitCode> {
         }
         Cmd::Approvals => open_approval_page(),
         Cmd::EnrollCode => ctl(CtlMsg::EnrollCode).await,
-        Cmd::Hook { adapter } => match adapter.as_str() {
-            "claude-code" => hook::run_claude_code().await,
-            other => {
-                eprintln!("unknown hook adapter: {other} (supported: claude-code)");
-                Ok(ExitCode::FAILURE)
-            }
-        },
+        Cmd::Hook { adapter } => hook::run_adapter(&adapter).await,
         Cmd::Audit { cmd } => match cmd {
             AuditCmd::Verify { path } => audit_verify(path),
         },
