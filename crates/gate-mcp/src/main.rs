@@ -4,11 +4,12 @@
 //! binary. Tools submit through the gatehouse agent socket — exec is
 //! broker-executed; fetch is policy-checked then performed by this process.
 
+mod ipc;
+
 use anyhow::Context;
-use gatehouse_proto::{paths, AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation};
+use gatehouse_proto::{AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation};
 use serde_json::{json, Value};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-use tokio::net::UnixStream;
 use url::Url;
 
 #[tokio::main]
@@ -256,11 +257,7 @@ enum SubmitResult {
 }
 
 async fn submit(request: GateRequest, execute: bool) -> anyhow::Result<SubmitResult> {
-    let sock = paths::agent_sock();
-    let stream = UnixStream::connect(&sock)
-        .await
-        .with_context(|| format!("connect {}: is gatehoused running?", sock.display()))?;
-    let (read, mut write) = stream.into_split();
+    let (read, mut write) = ipc::connect_agent().await?;
     let mut msg = serde_json::to_string(&AgentMsg::Submit { request, execute })?;
     msg.push('\n');
     write.write_all(msg.as_bytes()).await?;

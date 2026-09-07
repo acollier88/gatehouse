@@ -205,9 +205,9 @@ commands.
 - [x] **PR #1 (parked)**: Codex `PreToolUse` confirmed in official hooks
       docs (nested `hooks.PreToolUse`, deny via exit 2); installer writes
       that shape; OpenCode fail-open documented; rebased onto current main.
-- [ ] **PR #2 (parked)**: rebase onto post-#3 layout (policy now lives in
-      gatehouse-proto); apply constant-time treatment to the TCP IPC
-      `AUTH <token>` line.
+- [x] **PR #2 (parked)**: merged onto current main (policy in
+      gatehouse-proto); TCP `AUTH` compared constant-time; IPC tokens are
+      CSPRNG; `gate-mcp` uses the same endpoint resolver.
 - [ ] Native/pinned approval client to close S1's residual risk (roadmap
       Phase 9).
 

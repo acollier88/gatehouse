@@ -3,7 +3,6 @@
 //! Tokens are stored encrypted at rest. A SHA-256 hash is kept only for
 //! dedupe/logging. Push payloads must never authorize an approval.
 
-use std::os::unix::fs::PermissionsExt;
 use std::path::PathBuf;
 
 use aes_gcm::aead::{Aead, KeyInit};
@@ -44,7 +43,11 @@ fn key_bytes() -> anyhow::Result<[u8; 32]> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(&path, key)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(key)
 }
 
@@ -85,7 +88,11 @@ fn save(store: &StoreFile) -> anyhow::Result<()> {
         std::fs::create_dir_all(dir)?;
     }
     std::fs::write(&path, serde_json::to_string_pretty(store)?)?;
-    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
+    }
     Ok(())
 }
 

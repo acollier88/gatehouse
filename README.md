@@ -19,7 +19,7 @@ Early development. See [docs/PLAN.md](docs/PLAN.md) for the phased roadmap.
 - [x] Phase 5 — MCP gateway, `gate audit verify` / `policy test`, threat model
 - [x] Phase 6 — hosted / integrator relay (stable phone RP without Tailscale)
 - [x] Phase 7 — more harness adapters (Codex + OpenCode shipped; Cursor docs)
-- [ ] Phase 8 — Windows + Linux support for `gatehoused` / `gate`
+- [x] Phase 8 — Windows + Linux support for `gatehoused` / `gate` (IPC + CI)
 - [ ] Phase 9 — dedicated approval app (research; passkeys + push, not OTP)
 
 ## Design principles
@@ -162,5 +162,7 @@ Container recipe: [docker-compose.yml](docker-compose.yml)
 - `crates/gatehoused` — host daemon: policy engine, approval channels, executor, audit log, phone relay
 - `crates/gate` — client CLI: `gate run -- <cmd>`, `gate ask`, `gate grant`, `gate hook`
 - `adapters/claude-code` — PreToolUse hook integration
+- [adapters/](adapters/) — harness hook adapters (Claude Code, Codex, OpenCode, …)
 - [docs/relay.md](docs/relay.md) — phone PWA + mTLS relay setup
 - [docs/hosted-relay.md](docs/hosted-relay.md) — Phase 6 integrator / hosted relay sketch
+- [docs/platform.md](docs/platform.md) — macOS / Linux / Windows IPC notes
