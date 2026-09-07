@@ -75,3 +75,28 @@ pub fn relay_config_path() -> PathBuf {
 pub fn phone_passkeys_path() -> PathBuf {
     data_dir().join("passkeys-phone.json")
 }
+
+/// Enrolled devices on the relay host (`devices.json`).
+pub fn devices_path() -> PathBuf {
+    relay_dir().join("devices.json")
+}
+
+/// Daemon-side device credential for token-auth / hosted relay dial-out.
+pub fn device_cred_path() -> PathBuf {
+    data_dir().join("device.json")
+}
+
+/// Optional daemon relay pointer (`relay.toml`).
+pub fn relay_toml_path() -> PathBuf {
+    config_dir().join("relay.toml")
+}
+
+/// Encrypted APNs device tokens (relay host). Mode 0600.
+pub fn apns_devices_path() -> PathBuf {
+    relay_dir().join("apns-devices.json")
+}
+
+/// AES-256 key for APNs token encryption (relay host). Mode 0600.
+pub fn apns_key_path() -> PathBuf {
+    relay_dir().join("apns.key")
+}

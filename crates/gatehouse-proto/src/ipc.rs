@@ -148,11 +148,8 @@ pub fn resolve_ctl_endpoint() -> std::io::Result<Endpoint> {
 }
 
 pub fn new_token() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    // Not a CSPRNG; sufficient for loopback pairing with 0600 endpoint file.
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    format!("gh{:x}{:x}", nanos, std::process::id())
+    use rand::RngCore;
+    let mut bytes = [0u8; 32];
+    rand::thread_rng().fill_bytes(&mut bytes);
+    hex::encode(bytes)
 }

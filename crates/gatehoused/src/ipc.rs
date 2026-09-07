@@ -89,9 +89,9 @@ pub async fn accept(
             let mut r = BufReader::new(r);
             let mut auth_line = String::new();
             r.read_line(&mut auth_line).await?;
-            let auth = auth_line.trim_end_matches(['\r', '\n']);
+            let auth = auth_line.trim_end_matches(['\r', '\n']).as_bytes();
             let expected = format!("AUTH {token}");
-            if auth != expected {
+            if !auth_eq(auth, expected.as_bytes()) {
                 let _ = w
                     .write_all(b"{\"type\":\"error\",\"message\":\"unauthorized\"}\n")
                     .await;
@@ -100,6 +100,13 @@ pub async fn accept(
             Ok((Box::new(r), Box::new(w)))
         }
     }
+}
+
+fn auth_eq(presented: &[u8], expected: &[u8]) -> bool {
+    use subtle::ConstantTimeEq;
+    // Length is not secret (the AUTH prefix is fixed). Compare bodies
+    // constant-time so a wrong token does not leak via short-circuit.
+    presented.len() == expected.len() && bool::from(presented.ct_eq(expected))
 }
 
 pub fn cleanup(agent: &Endpoint, ctl: &Endpoint) {

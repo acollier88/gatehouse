@@ -1,18 +1,20 @@
 [package]
-name = "gate"
+name = "gate-mcp"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
 repository.workspace = true
+description = "MCP server exposing gated_exec / gated_fetch through gatehouse"
+
+[[bin]]
+name = "gate-mcp"
+path = "src/main.rs"
 
 [dependencies]
 gatehouse-proto.workspace = true
 tokio.workspace = true
-serde.workspace = true
 serde_json.workspace = true
 anyhow.workspace = true
-clap.workspace = true
 base64.workspace = true
-rand.workspace = true
-shell-words = "1"
-toml.workspace = true
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"] }
+url.workspace = true

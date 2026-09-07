@@ -57,12 +57,43 @@ enum Cmd {
     /// Show daemon status.
     Status,
     /// Open the approval page to enroll a passkey (Touch ID on macOS).
+    /// Prints a one-time enrollment code to type on the approval page.
     Enroll,
     /// Open the approval page to act on pending requests.
     Approvals,
-    /// Harness hook adapters (reads hook JSON on stdin). Currently:
-    /// `gate hook claude-code` for Claude Code PreToolUse.
+    /// Print a one-time code authorising one passkey enrollment.
+    EnrollCode,
+    /// Harness hook adapters (reads hook JSON on stdin):
+    /// `claude-code`, `codex`, or `generic`.
     Hook { adapter: String },
+    /// Audit log tools.
+    Audit {
+        #[command(subcommand)]
+        cmd: AuditCmd,
+    },
+    /// Policy dry-run tools.
+    Policy {
+        #[command(subcommand)]
+        cmd: PolicyCmd,
+    },
+}
+
+#[derive(Subcommand)]
+enum AuditCmd {
+    /// Verify the append-only audit hash chain.
+    Verify {
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PolicyCmd {
+    /// Resolve the policy tier for a command without executing it.
+    Test {
+        #[arg(trailing_var_arg = true, required = true)]
+        argv: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -79,15 +110,62 @@ async fn main() -> anyhow::Result<ExitCode> {
             ctl(CtlMsg::Grant { argv_glob, ttl_secs }).await
         }
         Cmd::Status => ctl(CtlMsg::Status).await,
-        Cmd::Enroll | Cmd::Approvals => open_approval_page(),
-        Cmd::Hook { adapter } => match adapter.as_str() {
-            "claude-code" => hook::run_claude_code().await,
-            other => {
-                eprintln!("unknown hook adapter: {other} (supported: claude-code)");
-                Ok(ExitCode::FAILURE)
-            }
+        Cmd::Enroll => {
+            // Enrollment needs the code, so mint one before opening the page.
+            // A daemon that is not up is reported by open_approval_page.
+            let _ = ctl(CtlMsg::EnrollCode).await;
+            open_approval_page()
+        }
+        Cmd::Approvals => open_approval_page(),
+        Cmd::EnrollCode => ctl(CtlMsg::EnrollCode).await,
+        Cmd::Hook { adapter } => hook::run_adapter(&adapter).await,
+        Cmd::Audit { cmd } => match cmd {
+            AuditCmd::Verify { path } => audit_verify(path),
+        },
+        Cmd::Policy { cmd } => match cmd {
+            PolicyCmd::Test { argv } => policy_test(argv),
         },
     }
+}
+
+fn audit_verify(path: Option<std::path::PathBuf>) -> anyhow::Result<ExitCode> {
+    let path = path.unwrap_or_else(paths::audit_path);
+    match gatehouse_proto::audit_log::verify_file(&path) {
+        Ok(n) => {
+            println!("ok: {} entries, chain intact ({})", n, path.display());
+            Ok(ExitCode::SUCCESS)
+        }
+        Err(e) => {
+            eprintln!("audit verify failed: {e}");
+            Ok(ExitCode::FAILURE)
+        }
+    }
+}
+
+fn policy_test(argv: Vec<String>) -> anyhow::Result<ExitCode> {
+    use gatehouse_proto::Policy;
+    let path = paths::policy_path();
+    let policy = if path.exists() {
+        Policy::load(&path)?
+    } else {
+        toml::from_str(gatehouse_proto::policy::DEFAULT_POLICY)
+            .context("parse default policy")?
+    };
+    let cwd = std::env::current_dir()?
+        .to_str()
+        .context("cwd")?
+        .to_string();
+    let request = GateRequest {
+        harness: "policy-test".into(),
+        session_id: "dry-run".into(),
+        env_allowlist: vec![],
+        op: Operation::Exec { argv, cwd },
+    };
+    let (tier, rule) = policy.resolve(&request);
+    println!("tier={tier} rule={rule}");
+    println!("summary={}", request.summary());
+    println!("digest={}", &request.digest()?[..16]);
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Prefer the phone relay URL when configured; else the localhost page.
@@ -245,6 +323,11 @@ async fn ctl(msg: CtlMsg) -> anyhow::Result<ExitCode> {
                     e.harness
                 );
             }
+            Ok(ExitCode::SUCCESS)
+        }
+        CtlResp::EnrollCode { code, ttl_secs } => {
+            println!("enrollment code: {code}  (valid {ttl_secs}s, single use)");
+            println!("type it on the approval page when enrolling a passkey");
             Ok(ExitCode::SUCCESS)
         }
         CtlResp::Status { version, pending, grants, uptime_secs } => {
