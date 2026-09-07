@@ -20,3 +20,7 @@ Requires `gate` on PATH and Node-capable OpenCode host. Daemon must be running.
 
 Same ceiling as Claude Code: the plugin can throw to block, but OpenCode is
 still the executor. Use sandboxing / `gate run` for enforcement.
+
+**Fail-open on "ask":** if the daemon is down or returns `decision: "ask"`,
+the plugin does **not** throw. OpenCode continues and uses its own prompts.
+Only `decision: "deny"` blocks the tool.

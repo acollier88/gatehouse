@@ -1,27 +1,15 @@
 use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::io::Write;
 use std::path::Path;
 
+use gatehouse_proto::audit_log::{entry_hash, Entry, GENESIS};
 use gatehouse_proto::Tier;
-use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
-pub const GENESIS: &str = "genesis";
-
-/// One line of the append-only audit log. `hash` covers the JCS form of the
-/// entry with `hash` removed, and `prev` chains to the previous line — so
-/// truncation or edits anywhere break verification of every later line.
-#[derive(Serialize, Deserialize, Debug)]
-pub struct Entry {
-    pub ts: i64,
-    pub digest: String,
-    pub summary: String,
-    pub tier: Tier,
-    pub decision: String,
-    pub rule: String,
-    pub prev: String,
-    #[serde(default)]
-    pub hash: String,
+pub fn now_unix() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs() as i64
 }
 
 pub struct Audit {
@@ -34,12 +22,11 @@ impl Audit {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
         }
-        let last_hash = match File::open(path) {
-            Ok(f) => BufReader::new(f)
+        let last_hash = match std::fs::read_to_string(path) {
+            Ok(text) => text
                 .lines()
-                .map_while(Result::ok)
-                .last()
-                .and_then(|line| serde_json::from_str::<Entry>(&line).ok())
+                .rfind(|l| !l.trim().is_empty())
+                .and_then(|line| serde_json::from_str::<Entry>(line).ok())
                 .map(|e| e.hash)
                 .unwrap_or_else(|| GENESIS.to_string()),
             Err(_) => GENESIS.to_string(),
@@ -75,40 +62,10 @@ impl Audit {
     }
 }
 
-/// Hash of the JCS form of the entry with `hash` blanked.
-pub fn entry_hash(entry: &Entry) -> anyhow::Result<String> {
-    #[derive(Serialize)]
-    struct Body<'a> {
-        ts: i64,
-        digest: &'a str,
-        summary: &'a str,
-        tier: Tier,
-        decision: &'a str,
-        rule: &'a str,
-        prev: &'a str,
-    }
-    let body = serde_jcs::to_string(&Body {
-        ts: entry.ts,
-        digest: &entry.digest,
-        summary: &entry.summary,
-        tier: entry.tier,
-        decision: &entry.decision,
-        rule: &entry.rule,
-        prev: &entry.prev,
-    })?;
-    Ok(hex::encode(Sha256::digest(body.as_bytes())))
-}
-
-pub fn now_unix() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
-        .as_secs() as i64
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gatehouse_proto::audit_log::verify_file;
 
     #[test]
     fn chain_links_and_survives_reopen() {
@@ -123,25 +80,13 @@ mod tests {
             a.record("d2", "Run `git push`", Tier::AskStrong, "pending", "r2")
                 .unwrap();
         }
-        // Reopen and append; the chain must continue from the last hash.
         {
             let mut a = Audit::open(&path).unwrap();
             a.record("d2", "Run `git push`", Tier::AskStrong, "approved", "r2")
                 .unwrap();
         }
 
-        let lines: Vec<Entry> = std::fs::read_to_string(&path)
-            .unwrap()
-            .lines()
-            .map(|l| serde_json::from_str(l).unwrap())
-            .collect();
-        assert_eq!(lines.len(), 3);
-        assert_eq!(lines[0].prev, GENESIS);
-        assert_eq!(lines[1].prev, lines[0].hash);
-        assert_eq!(lines[2].prev, lines[1].hash);
-        for e in &lines {
-            assert_eq!(e.hash, entry_hash(e).unwrap());
-        }
+        assert_eq!(verify_file(&path).unwrap(), 3);
         std::fs::remove_file(&path).ok();
     }
 }

@@ -21,14 +21,21 @@ if os.path.exists(path):
         cfg = json.load(f)
 
 entry = {
-    "matcher": "Bash|bash|Shell|shell|Write|Edit|write|edit|str_replace|ApplyPatch",
+    "matcher": "Bash|apply_patch|Edit|Write",
     "hooks": [{"type": "command", "command": f"{gate} hook codex", "timeout": 600}],
 }
-pre = cfg.setdefault("PreToolUse", [])
-# Codex hooks.json top-level keys are event names (not nested under "hooks").
+# Official Codex shape is { "hooks": { "PreToolUse": [...] } }. Also accept a
+# legacy top-level PreToolUse array and migrate it under hooks.
+if "hooks" not in cfg or not isinstance(cfg.get("hooks"), dict):
+    migrated = cfg.get("PreToolUse") if isinstance(cfg.get("PreToolUse"), list) else []
+    rest = {k: v for k, v in cfg.items() if k != "PreToolUse"}
+    cfg = rest
+    cfg["hooks"] = {"PreToolUse": migrated}
+hooks_root = cfg["hooks"]
+pre = hooks_root.setdefault("PreToolUse", [])
 if not isinstance(pre, list):
     pre = []
-    cfg["PreToolUse"] = pre
+    hooks_root["PreToolUse"] = pre
 pre[:] = [e for e in pre if "hook codex" not in json.dumps(e)]
 pre.append(entry)
 with open(path, "w") as f:

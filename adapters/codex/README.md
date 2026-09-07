@@ -16,9 +16,12 @@ Requires `gate` on PATH and a running `gatehoused`.
 
 ## Behaviour
 
-- Stdin JSON is treated like Claude-shaped hooks (`tool_name` / `tool_input`).
-- Shell / bash tools become policy `exec` requests; write/edit tools become
-  `file_write`.
+- Installer writes the official `{ "hooks": { "PreToolUse": [...] } }` shape
+  and matches `Bash`, `apply_patch`, `Edit`, and `Write`.
+- After install, trust the hook in Codex with `/hooks` (unsigned hooks are
+  skipped until reviewed).
+- Stdin JSON is Claude-shaped (`tool_name` / `tool_input`). `apply_patch`
+  and Bash both expose `tool_input.command`.
 - **Exit code 2** = deny (Codex blocks the tool). Allow and “ask” exit 0 so
   Codex can fall back to its own approval UI when the daemon is down.
 

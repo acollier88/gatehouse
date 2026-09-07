@@ -59,6 +59,16 @@ impl Shared {
             .collect()
     }
 
+    /// Nonce of a pending request, without consuming it. Approval paths need
+    /// it to re-derive the ceremony challenge before releasing.
+    pub fn pending_nonce(&self, digest: &str) -> Option<String> {
+        self.pending
+            .lock()
+            .unwrap()
+            .get(digest)
+            .map(|p| p.nonce.clone())
+    }
+
     /// Remove and return the pending entry uniquely identified by a digest
     /// prefix. Errors on no match or ambiguity.
     pub fn take_pending(&self, digest_prefix: &str) -> Result<(String, Pending), String> {

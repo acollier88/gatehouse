@@ -85,6 +85,8 @@ pub enum CtlMsg {
     /// Session grant: argv glob auto-allowed until the TTL lapses.
     Grant { argv_glob: String, ttl_secs: u64 },
     Status,
+    /// Mint a one-time code that authorises one passkey enrollment.
+    EnrollCode,
 }
 
 #[derive(Serialize, Deserialize, Clone, Debug)]
@@ -107,6 +109,8 @@ pub struct GrantInfo {
 pub enum CtlResp {
     Ok { message: String },
     Pending { entries: Vec<PendingEntry> },
+    /// A one-time enrollment code and how long it stays valid.
+    EnrollCode { code: String, ttl_secs: u64 },
     Status {
         version: u32,
         pending: usize,
