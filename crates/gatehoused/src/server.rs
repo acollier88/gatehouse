@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use base64::Engine;
 use gatehouse_proto::{
-    AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation, Tier,
+    AgentMsg, ApprovalEnvelope, DaemonMsg, DecisionStatus, GateRequest, Operation, SigScheme, Tier,
 };
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
@@ -56,25 +56,41 @@ pub async fn run(listener: LocalListener, ctx: Arc<Ctx>) {
     }
 }
 
-async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute: bool) {
+async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, mut request: GateRequest, execute: bool) {
+    // Env passthrough is a policy decision, not the requester's. Narrow the
+    // request *before* digesting so the summary every approver reads, and
+    // the digest they approve, name exactly the variables that will pass.
+    let wanted = std::mem::take(&mut request.env_allowlist);
+    request.env_allowlist = ctx.policy.exec.effective_env(&wanted);
+    if wanted.len() != request.env_allowlist.len() {
+        let dropped: Vec<&String> = wanted
+            .iter()
+            .filter(|n| !request.env_allowlist.contains(n))
+            .collect();
+        warn!("dropping env vars not in policy [exec] env_passthrough: {dropped:?}");
+    }
     let digest = match request.digest() {
         Ok(d) => d,
         Err(e) => {
-            send(w, &DaemonMsg::Error { message: e.to_string() }).await;
+            send(
+                w,
+                &DaemonMsg::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await;
             return;
         }
     };
     let summary = request.summary();
-    let (mut tier, mut rule) = ctx.policy.resolve(&request);
+    let (mut tier, mut rule) = ctx.policy.resolve(
+        &request,
+        gatehouse_proto::policy::Mode::from_execute(execute),
+    );
 
-    // Session grants can lift ask tiers to allow, never a deny.
-    if matches!(tier, Tier::Ask | Tier::AskStrong) {
-        if let Operation::Exec { argv, .. } = &request.op {
-            if ctx.state.grant_matches(&argv.join(" ")) {
-                tier = Tier::Allow;
-                rule = "session grant".into();
-            }
-        }
+    if grant_lifts(&ctx.state, tier, &request.op) {
+        tier = Tier::Allow;
+        rule = "session grant".into();
     }
 
     let decision = |status| DaemonMsg::Decision {
@@ -95,7 +111,7 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
             ctx.audit(&digest, &summary, tier, "allowed", &rule);
             send(w, &decision(DecisionStatus::Allowed)).await;
             if execute {
-                run_child(w, &request).await;
+                run_child(w, &ctx.policy, &request).await;
             }
         }
         Tier::Ask | Tier::AskStrong => {
@@ -185,13 +201,27 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
                 }
             };
 
+            // Defence in depth for the ctl-side check: an unattested envelope
+            // never releases an ask-strong request while a passkey exists.
+            let approval = approval.filter(|env| {
+                let ok = !(tier == Tier::AskStrong
+                    && env.scheme == SigScheme::None
+                    && ctx.passkeys_enrolled());
+                if !ok {
+                    warn!(
+                        "[{short}] unattested approval refused for ask-strong (passkey enrolled)"
+                    );
+                }
+                ok
+            });
+
             if let Some(envelope) = approval {
-                let via = format!("{:?}:{}", envelope.scheme, envelope.key_id);
-                info!("approved [{short}] {summary} via {via}");
-                ctx.audit(&digest, &summary, tier, "approved", &via);
+                let (outcome, via) = approval_audit_label(tier, &envelope);
+                info!("{outcome} [{short}] {summary} via {via}");
+                ctx.audit(&digest, &summary, tier, outcome, &via);
                 send(w, &decision(DecisionStatus::Allowed)).await;
                 if execute {
-                    run_child(w, &request).await;
+                    run_child(w, &ctx.policy, &request).await;
                 }
             } else {
                 info!("denied [{short}] {summary}");
@@ -202,32 +232,96 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
     }
 }
 
-/// Environment variables always passed through to children, on top of the
-/// request's explicit allowlist.
-const BASE_ENV: &[&str] = &["PATH", "HOME", "TERM", "LANG", "USER", "SHELL", "TMPDIR"];
+/// Session grants lift `ask` to `allow` for exec ops and nothing else. They are
+/// created over the ctl socket without any attestation, so letting one lift
+/// `ask_strong` would let anything that reaches ctl (`gate grant "git push*"`)
+/// stand in for the passkey. Deny is never lifted either.
+fn grant_lifts(state: &crate::state::Shared, tier: Tier, op: &Operation) -> bool {
+    if tier != Tier::Ask {
+        return false;
+    }
+    match op {
+        Operation::Exec { argv, .. } => state.grant_matches(&argv.join(" ")),
+        _ => false,
+    }
+}
+
+/// Audit `(decision, via)` for a released request. Operator ctl approvals
+/// carry no signature; an ask-strong one only happens when no passkey is
+/// enrolled (the documented fallback) and gets its own decision string so
+/// it cannot be mistaken for an attested release when reading the log.
+fn approval_audit_label(tier: Tier, envelope: &ApprovalEnvelope) -> (&'static str, String) {
+    match (envelope.scheme, tier) {
+        (SigScheme::None, Tier::AskStrong) => (
+            "approved-unattested",
+            format!(
+                "{} (unattested: ask-strong approved without a passkey; none enrolled)",
+                envelope.key_id
+            ),
+        ),
+        (SigScheme::None, _) => ("approved", format!("{} (unattested)", envelope.key_id)),
+        (scheme, _) => ("approved", format!("{scheme:?}:{}", envelope.key_id)),
+    }
+}
+
+/// Environment variables always passed through to children (from the
+/// daemon's own environment), on top of the request's explicit allowlist.
+/// `PATH` is not among them: children get the policy's trusted exec path.
+const BASE_ENV: &[&str] = &["HOME", "TERM", "LANG", "USER", "SHELL", "TMPDIR"];
 
 /// Broker-executes: the daemon runs the approved argv itself and streams
 /// output back. The agent never gets to run the command in its own context.
-async fn run_child(w: &Writer, request: &GateRequest) {
+///
+/// The program is resolved by [`Policy::resolve_program`]: a bare name only
+/// against the trusted `[exec] path`, never the daemon's `PATH` or the
+/// request cwd; that resolved path is what gets executed.
+async fn run_child(w: &Writer, policy: &gatehouse_proto::Policy, request: &GateRequest) {
     let Operation::Exec { argv, cwd } = &request.op else {
         return;
     };
-    let mut cmd = tokio::process::Command::new(&argv[0]);
+    let Some(program) = argv.first().and_then(|p| policy.resolve_program(p, cwd)) else {
+        send(
+            w,
+            &DaemonMsg::Error {
+                message: format!(
+                    "spawn failed: `{}` not found in the trusted exec path \
+                     (policy [exec] path)",
+                    argv.first().map(String::as_str).unwrap_or("")
+                ),
+            },
+        )
+        .await;
+        send(w, &DaemonMsg::Exit { code: 127 }).await;
+        return;
+    };
+    let mut cmd = tokio::process::Command::new(&program);
+    // Keep the requested argv[0] as the child's argv[0] (busybox-style
+    // multi-call binaries dispatch on it).
+    #[cfg(unix)]
+    cmd.arg0(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
         .env_clear()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if let Ok(path) = std::env::join_paths(policy.exec_path()) {
+        cmd.env("PATH", path);
+    }
+    // Re-filter here too, so no caller can hand run_child an unvetted list.
+    let passed = policy.exec.effective_env(&request.env_allowlist);
     for key in BASE_ENV
         .iter()
         .copied()
-        .chain(request.env_allowlist.iter().map(String::as_str))
+        .chain(passed.iter().map(String::as_str))
     {
         if let Ok(val) = std::env::var(key) {
             cmd.env(key, val);
         }
     }
+    // Own process group, so a timeout can kill everything the child spawned.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -243,28 +337,122 @@ async fn run_child(w: &Writer, request: &GateRequest) {
             return;
         }
     };
+    let pid = child.id();
 
+    let limit = OutputLimit::new(policy.exec.max_output_bytes);
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let (out_w, err_w) = (w.clone(), w.clone());
-    let out_task = tokio::spawn(async move {
-        pump(&mut stdout, &out_w, false).await;
+    let (out_l, err_l) = (limit.clone(), limit.clone());
+    let mut out_task = tokio::spawn(async move {
+        pump(&mut stdout, &out_w, false, &out_l).await;
     });
-    let err_task = tokio::spawn(async move {
-        pump(&mut stderr, &err_w, true).await;
+    let mut err_task = tokio::spawn(async move {
+        pump(&mut stderr, &err_w, true, &err_l).await;
     });
-    let _ = out_task.await;
-    let _ = err_task.await;
-    let code = child
-        .wait()
-        .await
-        .ok()
-        .and_then(|s| s.code())
-        .unwrap_or(-1);
+
+    let timeout = std::time::Duration::from_secs(policy.exec.timeout_secs.max(1));
+    let finished = tokio::time::timeout(timeout, async {
+        let _ = (&mut out_task).await;
+        let _ = (&mut err_task).await;
+        child.wait().await
+    })
+    .await;
+    let code = match finished {
+        Ok(status) => status.ok().map(exit_code).unwrap_or(-1),
+        Err(_) => {
+            kill_tree(pid, &mut child).await;
+            out_task.abort();
+            err_task.abort();
+            warn!("child timed out after {}s; killed", timeout.as_secs());
+            let note = format!(
+                "\n[gatehouse: killed after {}s timeout (policy [exec] timeout_secs)]\n",
+                timeout.as_secs()
+            );
+            send(w, &stderr_msg(note.as_bytes())).await;
+            EXIT_TIMED_OUT
+        }
+    };
     send(w, &DaemonMsg::Exit { code }).await;
 }
 
-async fn pump<R: tokio::io::AsyncRead + Unpin>(reader: &mut R, w: &Writer, is_err: bool) {
+/// Exit code reported when the broker killed the child for running too
+/// long, matching coreutils `timeout(1)`.
+pub const EXIT_TIMED_OUT: i32 = 124;
+
+/// Exit code for a status, with Unix signals mapped to `128 + signo` like a
+/// shell does (otherwise a signal death has no code and looked like 0 to
+/// `gate`, which clamps negatives).
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    status.code().unwrap_or(-1)
+}
+
+/// Kill the child and, on Unix, its whole process group (the child was
+/// made a group leader at spawn). On Windows only the direct child is
+/// terminated; grandchildren survive (no job object yet).
+async fn kill_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
+        // SAFETY: plain syscall; a negative pid addresses the process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+/// Combined stdout+stderr byte budget shared by both pumps.
+#[derive(Clone)]
+struct OutputLimit {
+    max: u64,
+    used: Arc<std::sync::atomic::AtomicU64>,
+    marked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl OutputLimit {
+    fn new(max: u64) -> Self {
+        Self {
+            max,
+            used: Arc::default(),
+            marked: Arc::default(),
+        }
+    }
+
+    /// How many of the next `n` bytes may still be forwarded.
+    fn take(&self, n: usize) -> usize {
+        use std::sync::atomic::Ordering;
+        let before = self.used.fetch_add(n as u64, Ordering::SeqCst);
+        self.max.saturating_sub(before).min(n as u64) as usize
+    }
+
+    /// True exactly once, the first time output is cut.
+    fn first_truncation(&self) -> bool {
+        !self.marked.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn stderr_msg(bytes: &[u8]) -> DaemonMsg {
+    DaemonMsg::Stderr {
+        b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    }
+}
+
+async fn pump<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    w: &Writer,
+    is_err: bool,
+    limit: &OutputLimit,
+) {
     use tokio::io::AsyncReadExt;
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut buf = vec![0u8; 8192];
@@ -272,13 +460,25 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(reader: &mut R, w: &Writer, is_er
         match reader.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let data = b64.encode(&buf[..n]);
-                let msg = if is_err {
-                    DaemonMsg::Stderr { b64: data }
-                } else {
-                    DaemonMsg::Stdout { b64: data }
-                };
-                send(w, &msg).await;
+                let keep = limit.take(n);
+                if keep > 0 {
+                    let data = b64.encode(&buf[..keep]);
+                    let msg = if is_err {
+                        DaemonMsg::Stderr { b64: data }
+                    } else {
+                        DaemonMsg::Stdout { b64: data }
+                    };
+                    send(w, &msg).await;
+                }
+                // Past the cap: keep draining so the child never blocks on a
+                // full pipe (the timeout bounds how long that can go on).
+                if keep < n && limit.first_truncation() {
+                    let note = format!(
+                        "\n[gatehouse: output truncated at {} bytes (policy [exec] max_output_bytes)]\n",
+                        limit.max
+                    );
+                    send(w, &stderr_msg(note.as_bytes())).await;
+                }
             }
         }
     }
@@ -308,4 +508,437 @@ fn new_nonce() -> String {
     let mut bytes = [0u8; 32];
     rand::thread_rng().fill_bytes(&mut bytes);
     hex::encode(bytes)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{Duration, Instant};
+
+    use gatehouse_proto::{CtlMsg, CtlResp, Policy};
+    use tokio::io::AsyncReadExt;
+
+    use crate::state::Grant;
+
+    fn default_policy() -> Policy {
+        toml::from_str(gatehouse_proto::policy::DEFAULT_POLICY).unwrap()
+    }
+
+    fn exec(argv: &[&str]) -> GateRequest {
+        GateRequest {
+            harness: "test".into(),
+            session_id: "s".into(),
+            env_allowlist: vec![],
+            op: Operation::Exec {
+                argv: argv.iter().map(|s| s.to_string()).collect(),
+                cwd: std::env::temp_dir().to_string_lossy().into_owned(),
+            },
+        }
+    }
+
+    /// Run one submit to completion and return every message the daemon sent.
+    async fn submit(ctx: &Arc<Ctx>, req: GateRequest, execute: bool) -> Vec<DaemonMsg> {
+        let (mut client, server) = tokio::io::duplex(1 << 20);
+        let w: Writer = Arc::new(tokio::sync::Mutex::new(Box::new(server)));
+        handle_submit(&w, ctx, req, execute).await;
+        drop(w);
+        let mut buf = String::new();
+        client.read_to_string(&mut buf).await.unwrap();
+        buf.lines()
+            .map(|l| serde_json::from_str(l).unwrap())
+            .collect()
+    }
+
+    fn statuses(msgs: &[DaemonMsg]) -> Vec<(Tier, DecisionStatus)> {
+        msgs.iter()
+            .filter_map(|m| match m {
+                DaemonMsg::Decision { tier, status, .. } => Some((*tier, *status)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    fn grant(ctx: &Arc<Ctx>, glob: &str) -> CtlResp {
+        crate::ctl::handle(
+            ctx,
+            CtlMsg::Grant {
+                argv_glob: glob.into(),
+                ttl_secs: 60,
+            },
+            Instant::now(),
+        )
+    }
+
+    fn last_audit_decision(path: &std::path::Path) -> (String, String) {
+        let text = std::fs::read_to_string(path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(text.lines().last().unwrap()).unwrap();
+        (
+            v["decision"].as_str().unwrap().to_string(),
+            v["rule"].as_str().unwrap().to_string(),
+        )
+    }
+
+    /// Regression: `gate grant "*"` used to lift every ask-strong request to
+    /// allow, bypassing the passkey entirely.
+    #[tokio::test]
+    async fn grant_star_is_rejected() {
+        let (ctx, _) = crate::test_ctx(default_policy(), Duration::from_millis(100), vec![]);
+        assert!(matches!(grant(&ctx, "*"), CtlResp::Error { .. }));
+        assert!(matches!(grant(&ctx, "* *"), CtlResp::Error { .. }));
+        assert!(ctx.state.grant_snapshot().is_empty());
+    }
+
+    #[tokio::test]
+    async fn grants_never_lift_ask_strong() {
+        let (ctx, _) = crate::test_ctx(default_policy(), Duration::from_millis(100), vec![]);
+        // A validated grant naming the program exactly...
+        assert!(matches!(grant(&ctx, "git push*"), CtlResp::Ok { .. }));
+        // ...and even a `*` grant planted behind validation's back.
+        ctx.state.grants.lock().unwrap().push(Grant {
+            argv_glob: "*".into(),
+            expires: Instant::now() + Duration::from_secs(60),
+        });
+        let msgs = submit(&ctx, exec(&["git", "push", "origin", "main"]), false).await;
+        assert_eq!(
+            statuses(&msgs),
+            vec![
+                (Tier::AskStrong, DecisionStatus::Pending),
+                (Tier::AskStrong, DecisionStatus::Denied)
+            ],
+            "ask-strong must stay pending and time out, never be granted"
+        );
+        // Deny is not liftable either.
+        let msgs = submit(&ctx, exec(&["sudo", "ls"]), false).await;
+        assert_eq!(statuses(&msgs), vec![(Tier::Deny, DecisionStatus::Denied)]);
+    }
+
+    /// Regression: broker-executed git in an agent-writable repo is code
+    /// execution via repo config, so `gate run -- git status` must not be
+    /// auto-allowed; the advisory decision (hook mode) still is.
+    #[tokio::test]
+    async fn broker_run_git_asks_but_advisory_git_allows() {
+        let (ctx, _) = crate::test_ctx(default_policy(), Duration::from_millis(100), vec![]);
+        let msgs = submit(&ctx, exec(&["git", "status"]), true).await;
+        assert_eq!(
+            statuses(&msgs),
+            vec![
+                (Tier::Ask, DecisionStatus::Pending),
+                (Tier::Ask, DecisionStatus::Denied)
+            ]
+        );
+        assert!(exit_of(&msgs).is_none(), "nothing may have been executed");
+        let msgs = submit(&ctx, exec(&["git", "status"]), false).await;
+        assert_eq!(
+            statuses(&msgs),
+            vec![(Tier::Allow, DecisionStatus::Allowed)]
+        );
+    }
+
+    #[tokio::test]
+    async fn grants_still_lift_plain_ask() {
+        let (ctx, _) = crate::test_ctx(default_policy(), Duration::from_millis(100), vec![]);
+        assert!(matches!(grant(&ctx, "frobnicate *"), CtlResp::Ok { .. }));
+        let msgs = submit(&ctx, exec(&["frobnicate", "x"]), false).await;
+        assert_eq!(
+            statuses(&msgs),
+            vec![(Tier::Allow, DecisionStatus::Allowed)]
+        );
+    }
+
+    /// Spawn a submit, wait for it to be pending, return its digest.
+    async fn spawn_pending(
+        ctx: &Arc<Ctx>,
+        req: GateRequest,
+    ) -> (String, tokio::task::JoinHandle<Vec<DaemonMsg>>) {
+        let digest = req.digest().unwrap();
+        let c = ctx.clone();
+        let task = tokio::spawn(async move { submit(&c, req, false).await });
+        for _ in 0..200 {
+            if ctx.state.pending.lock().unwrap().contains_key(&digest) {
+                return (digest, task);
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        panic!("request never became pending");
+    }
+
+    /// No passkey enrolled: ctl approval of ask-strong is the documented
+    /// fallback, and the audit log must say it was unattested.
+    #[tokio::test]
+    async fn unattested_ask_strong_approval_is_labelled_in_audit() {
+        let (ctx, audit) = crate::test_ctx(default_policy(), Duration::from_secs(5), vec![]);
+        let (digest, task) = spawn_pending(&ctx, exec(&["git", "push"])).await;
+        let resp = crate::ctl::handle(
+            &ctx,
+            CtlMsg::Approve {
+                digest_prefix: digest[..8].into(),
+            },
+            Instant::now(),
+        );
+        assert!(matches!(resp, CtlResp::Ok { .. }), "{resp:?}");
+        let msgs = task.await.unwrap();
+        assert_eq!(statuses(&msgs).last().unwrap().1, DecisionStatus::Allowed);
+        let (decision, rule) = last_audit_decision(&audit);
+        assert_eq!(decision, "approved-unattested");
+        assert!(rule.contains("unattested"), "{rule}");
+    }
+
+    #[tokio::test]
+    async fn unattested_plain_ask_approval_says_so_in_audit() {
+        let (ctx, audit) = crate::test_ctx(default_policy(), Duration::from_secs(5), vec![]);
+        let (digest, task) = spawn_pending(&ctx, exec(&["frobnicate"])).await;
+        crate::ctl::handle(
+            &ctx,
+            CtlMsg::Approve {
+                digest_prefix: digest[..8].into(),
+            },
+            Instant::now(),
+        );
+        task.await.unwrap();
+        let (decision, rule) = last_audit_decision(&audit);
+        assert_eq!(decision, "approved");
+        assert_eq!(rule, "operator-ctl (unattested)");
+    }
+
+    #[cfg(unix)]
+    fn stdout_of(msgs: &[DaemonMsg]) -> String {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        msgs.iter()
+            .filter_map(|m| match m {
+                DaemonMsg::Stdout { b64: d } => Some(b64.decode(d).unwrap()),
+                _ => None,
+            })
+            .map(|b| String::from_utf8(b).unwrap())
+            .collect()
+    }
+
+    fn exit_of(msgs: &[DaemonMsg]) -> Option<i32> {
+        msgs.iter().find_map(|m| match m {
+            DaemonMsg::Exit { code } => Some(*code),
+            _ => None,
+        })
+    }
+
+    #[cfg(unix)]
+    fn script(dir: &std::path::Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    #[cfg(unix)]
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("gh-srv-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The broker executes the trusted-path resolution of a bare name, never
+    /// a same-named file in the requester's cwd, and children get the
+    /// trusted path as PATH rather than the daemon's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_child_executes_the_trusted_program() {
+        let trusted = scratch("trusted");
+        let cwd = scratch("cwd");
+        script(&trusted, "frob", "echo trusted:$PATH");
+        script(&cwd, "frob", "echo pwned");
+        let mut policy: Policy = toml::from_str(
+            r#"
+            [[rules]]
+            name = "frob"
+            tier = "allow"
+            argv0 = ["frob"]
+            "#,
+        )
+        .unwrap();
+        policy.exec.path = vec![trusted.to_string_lossy().into_owned()];
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let mut req = exec(&["frob"]);
+        if let Operation::Exec { cwd: c, .. } = &mut req.op {
+            *c = cwd.to_string_lossy().into_owned();
+        }
+        let msgs = submit(&ctx, req, true).await;
+        assert_eq!(
+            stdout_of(&msgs).trim(),
+            format!("trusted:{}", trusted.display())
+        );
+        assert_eq!(exit_of(&msgs), Some(0));
+
+        // `./frob` is not the allow rule's frob: it falls to ask, and times out.
+        let mut req = exec(&["./frob"]);
+        if let Operation::Exec { cwd: c, .. } = &mut req.op {
+            *c = cwd.to_string_lossy().into_owned();
+        }
+        let msgs = submit(&ctx, req, true).await;
+        assert_eq!(statuses(&msgs).last().unwrap().1, DecisionStatus::Denied);
+        assert!(stdout_of(&msgs).is_empty());
+    }
+
+    #[cfg(unix)]
+    fn stderr_of(msgs: &[DaemonMsg]) -> String {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        msgs.iter()
+            .filter_map(|m| match m {
+                DaemonMsg::Stderr { b64: d } => Some(b64.decode(d).unwrap()),
+                _ => None,
+            })
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .collect()
+    }
+
+    /// A policy allowing one test script, run from a trusted temp dir (plus
+    /// the system dirs so the script can use sleep/echo).
+    #[cfg(unix)]
+    fn script_policy(name: &str, body: &str, exec_toml: &str) -> (Policy, std::path::PathBuf) {
+        let trusted = scratch("bin");
+        script(&trusted, name, body);
+        let mut policy: Policy = toml::from_str(&format!(
+            "[exec]\n{exec_toml}\n[[rules]]\nname = \"t\"\ntier = \"allow\"\nargv0 = [\"{name}\"]\n"
+        ))
+        .unwrap();
+        let mut path = vec![trusted.to_string_lossy().into_owned()];
+        path.extend(["/bin".to_string(), "/usr/bin".to_string()]);
+        policy.exec.path = path;
+        (policy, trusted)
+    }
+
+    /// Issue #10: a child that never exits is killed, with its process
+    /// group, and the requester sees exit 124 plus a note on stderr.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_child_and_its_process_group() {
+        let pidfile = scratch("pid").join("grandchild.pid");
+        let body = format!("sleep 300 &\necho $! > {}\nsleep 300", pidfile.display());
+        let (policy, _) = script_policy("hang", &body, "timeout_secs = 1");
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let started = Instant::now();
+        let msgs = submit(&ctx, exec(&["hang"]), true).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(exit_of(&msgs), Some(EXIT_TIMED_OUT));
+        assert!(
+            stderr_of(&msgs).contains("killed after 1s timeout"),
+            "{msgs:?}"
+        );
+
+        let grandchild: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut alive = true;
+        for _ in 0..100 {
+            // SAFETY: signal 0 only probes for existence.
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !alive,
+            "background grandchild {grandchild} survived the timeout"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_is_capped_with_a_marker() {
+        let (policy, _) = script_policy(
+            "chatty",
+            "i=0; while [ $i -lt 2000 ]; do echo 0123456789; i=$((i+1)); done; echo done >&2",
+            "max_output_bytes = 100",
+        );
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let msgs = submit(&ctx, exec(&["chatty"]), true).await;
+        let out = stdout_of(&msgs);
+        assert_eq!(out.len(), 100, "stdout should be cut at the cap");
+        let err = stderr_of(&msgs);
+        assert!(err.contains("output truncated at 100 bytes"), "{err}");
+        assert!(!err.contains("done"), "stderr counts toward the same cap");
+        // The child ran to completion (drained, not blocked or killed).
+        assert_eq!(exit_of(&msgs), Some(0));
+    }
+
+    /// Env passthrough: only names the policy lists reach the child, and the
+    /// decision summary (what approvers read) names exactly those.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_passthrough_is_filtered_by_policy_and_shown_in_summary() {
+        // Edition 2021: set_var is safe; names are unique to this test.
+        std::env::set_var("GH_TEST_PASS_OK", "visible");
+        std::env::set_var("GH_TEST_PASS_SECRET", "leaked");
+        let (policy, _) = script_policy(
+            "envy",
+            "echo ok=$GH_TEST_PASS_OK secret=$GH_TEST_PASS_SECRET path=$PATH",
+            "env_passthrough = [\"GH_TEST_PASS_OK\"]",
+        );
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let mut req = exec(&["envy"]);
+        req.env_allowlist = vec![
+            "GH_TEST_PASS_SECRET".into(),
+            "GH_TEST_PASS_OK".into(),
+            "PATH".into(),
+        ];
+        let msgs = submit(&ctx, req, true).await;
+        let out = stdout_of(&msgs);
+        assert!(out.starts_with("ok=visible secret= "), "{out}");
+        assert!(!out.contains("leaked"));
+        let summary = msgs
+            .iter()
+            .find_map(|m| match m {
+                DaemonMsg::Decision { summary, .. } => Some(summary.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(summary.ends_with("with env GH_TEST_PASS_OK"), "{summary}");
+        assert!(!summary.contains("SECRET"));
+    }
+
+    #[test]
+    fn signal_deaths_are_not_reported_as_success() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(exit_code(std::process::ExitStatus::from_raw(9)), 128 + 9);
+            assert_eq!(exit_code(std::process::ExitStatus::from_raw(3 << 8)), 3);
+        }
+    }
+
+    /// With a passkey enrolled the ctl path refuses ask-strong, and an
+    /// unattested envelope pushed straight at the waiter is refused too.
+    #[tokio::test]
+    async fn passkey_enrolled_refuses_unattested_ask_strong() {
+        let pk = crate::relay_client::tests::synthetic_passkey();
+        let (ctx, audit) = crate::test_ctx(default_policy(), Duration::from_secs(5), vec![pk]);
+        let (digest, task) = spawn_pending(&ctx, exec(&["git", "push"])).await;
+        let resp = crate::ctl::handle(
+            &ctx,
+            CtlMsg::Approve {
+                digest_prefix: digest[..8].into(),
+            },
+            Instant::now(),
+        );
+        assert!(matches!(resp, CtlResp::Error { .. }), "{resp:?}");
+
+        let (_, pending) = ctx.state.take_pending(&digest).unwrap();
+        let now = crate::audit::now_unix();
+        let _ = pending.tx.send(Some(ApprovalEnvelope {
+            digest: digest.clone(),
+            nonce: pending.nonce.clone(),
+            issued_at: now,
+            expires_at: now + 60,
+            key_id: "operator-ctl".into(),
+            scheme: SigScheme::None,
+            sig: String::new(),
+        }));
+        let msgs = task.await.unwrap();
+        assert_eq!(statuses(&msgs).last().unwrap().1, DecisionStatus::Denied);
+        assert_eq!(last_audit_decision(&audit).0, "denied");
+    }
 }

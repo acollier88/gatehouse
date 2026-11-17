@@ -60,7 +60,7 @@ async fn bind_named(
         let ep = Endpoint::unix(unix_path.to_string_lossy());
         write_endpoint(endpoint_path, &ep)?;
         info!("{label} ipc: {}", ep.display());
-        return Ok((LocalListener::Unix(listener), ep));
+        Ok((LocalListener::Unix(listener), ep))
     }
 
     #[cfg(not(unix))]

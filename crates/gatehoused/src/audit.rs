@@ -76,7 +76,8 @@ mod tests {
 
         {
             let mut a = Audit::open(&path).unwrap();
-            a.record("d1", "Run `ls`", Tier::Allow, "allowed", "r1").unwrap();
+            a.record("d1", "Run `ls`", Tier::Allow, "allowed", "r1")
+                .unwrap();
             a.record("d2", "Run `git push`", Tier::AskStrong, "pending", "r2")
                 .unwrap();
         }

@@ -43,6 +43,15 @@ jobs:
           mkdir -p "$GATEHOUSE_RUNTIME_DIR" "$GATEHOUSE_CONFIG_DIR" "$GATEHOUSE_DATA_DIR"
           bin=target/debug
           if [ -f target/debug/gatehoused.exe ]; then bin=target/debug; EXT=.exe; else EXT=; fi
+          if [ -n "$EXT" ]; then
+            # Windows: the broker resolves bare names only in the trusted
+            # [exec] path (default System32), and `echo` there is a cmd
+            # builtin. Point the smoke's policy at Git Bash's echo.exe.
+            echo_dir="$(cygpath -w "$(dirname "$(type -P echo)")")"
+            { cat crates/gatehouse-proto/default_policy.toml
+              printf "\n[exec]\npath = ['%s']\n" "$echo_dir"
+            } > "$GATEHOUSE_CONFIG_DIR/policy.toml"
+          fi
           "$bin/gatehoused$EXT" --no-open --approval-timeout-secs 30 &
           pid=$!
           trap 'kill $pid 2>/dev/null || true' EXIT

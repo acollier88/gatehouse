@@ -159,8 +159,7 @@ pub struct PendingWake {
 
 impl Ctx {
     pub fn passkeys_enrolled(&self) -> bool {
-        !self.passkeys.lock().unwrap().is_empty()
-            || !self.phone_passkeys.lock().unwrap().is_empty()
+        !self.passkeys.lock().unwrap().is_empty() || !self.phone_passkeys.lock().unwrap().is_empty()
     }
 
     /// Prefer the phone relay URL when available; else localhost page.
@@ -209,6 +208,33 @@ impl Ctx {
             warn!("audit write failed: {e}");
         }
     }
+}
+
+/// A daemon context for unit tests: no listeners, audit log in a fresh temp
+/// dir (returned so tests can read it back).
+#[cfg(test)]
+pub fn test_ctx(
+    policy: Policy,
+    approval_timeout: Duration,
+    passkeys: Vec<Passkey>,
+) -> (Arc<Ctx>, PathBuf) {
+    let dir = std::env::temp_dir().join(format!("gatehouse-test-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let audit_path = dir.join("audit.jsonl");
+    let ctx = Arc::new(Ctx {
+        policy,
+        state: Shared::default(),
+        approval_timeout,
+        passkeys: Mutex::new(passkeys),
+        phone_passkeys: Mutex::new(vec![]),
+        http: OnceLock::new(),
+        phone_url: OnceLock::new(),
+        enroll_codes: enroll::EnrollCodes::default(),
+        auto_open: false,
+        audit: Mutex::new(Audit::open(&audit_path).unwrap()),
+        pending_wake: tokio::sync::broadcast::channel(8).0,
+    });
+    (ctx, audit_path)
 }
 
 #[tokio::main]

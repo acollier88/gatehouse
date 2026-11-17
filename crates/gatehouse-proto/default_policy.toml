@@ -1,34 +1,198 @@
 # Gatehouse default policy. Rules are evaluated top to bottom; first match
 # wins. Tiers: "allow" | "ask" | "ask_strong" | "deny".
 #
-# Add your project roots here so file writes inside them auto-allow:
+# The broker executes allowed commands itself, so an "allow" rule is a
+# promise that the command cannot do anything worse than what the rule name
+# says. Keep allow rules narrow.
+#
+# Exec matchers (all given ones must hold):
+#   argv0           program names. For "allow" rules argv[0] must be the bare
+#                   name or an absolute path to that file in a trusted
+#                   [exec] path directory (`./ls`, `/tmp/x/ls` never match).
+#                   Other tiers match the basename, so odd spellings can only
+#                   fall through to a stricter tier.
+#   args_glob       globs against the arguments joined with spaces; any
+#                   match qualifies. (One argument containing spaces can look
+#                   like several -- prefer the per-argument matchers.)
+#   args_any_glob   per-argument globs: some single argument must match.
+#   args_deny_glob  per-argument globs: no single argument may match. Use it
+#                   to carve dangerous options out of an allow rule.
+#   args_in_workspace = true
+#                   the request cwd must be inside a `workspace` root and
+#                   every path-like argument (plain arguments and the value of
+#                   --opt=value) must resolve inside one. `~...` arguments and
+#                   path-shaped short-option clusters (`-f/etc/x`) never
+#                   qualify. With `workspace = []` such rules never match, so
+#                   the commands below that read file contents ask until you
+#                   set a workspace.
+#   advisory_only = true
+#                   the rule applies only to decision-only requests (harness
+#                   hooks, `gate ask`), never to ones the broker executes
+#                   (`gate run`, gated_exec); those skip it and fall through.
+#                   `gate policy test` prints both outcomes.
+#
+# Audit question for every allow rule below: if the broker runs this as the
+# daemon user, in a cwd and on files the agent controls, can it execute
+# something or write outside the workspace? Children get a cleared
+# environment (HOME TERM LANG USER SHELL TMPDIR, PATH = [exec] path), so
+# env-driven config such as RIPGREP_CONFIG_PATH, GREP_OPTIONS, LS_COLORS or
+# MAGIC is not passed. None of ls/grep/rg/find/cat/head/tail read an rc file
+# from HOME or the cwd. rg reads .ignore/.rgignore/.gitignore and the
+# global git excludes file, which only filter what is searched.
+#
+# Add your project roots here so file writes (and the file-reading rules
+# below) inside them auto-allow:
 # workspace = ["~/Code"]
 
 default_tier = "ask"
 workspace = []
 
+# How the broker runs approved commands.
+# [exec]
+# Trusted directories for bare program names, and the PATH children get.
+# The daemon's own PATH is never used. Default: /usr/bin /bin /usr/sbin
+# /sbin /usr/local/bin (+ /opt/homebrew/bin on macOS; System32 on Windows).
+# Add e.g. "~/.cargo/bin" if you want approved `cargo` runs to work. Only
+# list directories the agent cannot write to.
+# path = ["/usr/bin", "/bin", "/usr/local/bin"]
+# Kill a child (and on Unix its process group) after this long; the
+# requester sees exit code 124. Default 600.
+# timeout_secs = 600
+# Combined stdout+stderr bytes streamed back; the rest is discarded and a
+# truncation marker is sent on stderr. Default 16 MiB.
+# max_output_bytes = 16777216
+# Environment variable names a request (`gate run --env NAME`) may pass
+# from the daemon's environment. Anything else is dropped before the request
+# is digested, so approval summaries show exactly what passes. HOME, TERM,
+# LANG, USER, SHELL and TMPDIR are always passed; PATH is always the
+# trusted path above. Default: none.
+# env_passthrough = ["CARGO_TARGET_DIR", "RUST_LOG"]
+
+# Metadata only: these print names, sizes and types, never file contents,
+# and have no option that runs another program or writes a file. They are
+# allowed anywhere, so they do reveal which files exist outside the
+# workspace (and `wc` reveals sizes/line counts; GNU --files0-from only
+# reads a list of names to count). Checked: GNU and BSD ls, stat, wc, which
+# (GNU binary, Debian shell script, macOS binary), echo, pwd.
 [[rules]]
-name = "read-only basics"
+name = "read-only metadata"
 tier = "allow"
-argv0 = ["ls", "cat", "echo", "pwd", "rg", "grep", "head", "tail", "wc", "which", "file", "stat", "find"]
+argv0 = ["ls", "echo", "pwd", "wc", "which", "stat"]
 
 [[rules]]
-name = "git read-only"
+name = "read file contents inside the workspace"
 tier = "allow"
+argv0 = ["cat", "head", "tail"]
+args_in_workspace = true
+
+[[rules]]
+name = "grep inside the workspace"
+tier = "allow"
+argv0 = ["grep"]
+args_in_workspace = true
+# grep has no option that runs a program or writes a file. Denied:
+# -R / --dereference-recursive follow symlinks out of the workspace (GNU
+# accepts abbreviations, hence --der*); BSD/macOS -S follows all symlinks
+# when recursing.
+args_deny_glob = ["-R", "-[!-]*R*", "--der*", "-S", "-[!-]*S*"]
+
+[[rules]]
+name = "ripgrep inside the workspace"
+tier = "allow"
+argv0 = ["rg"]
+args_in_workspace = true
+# --pre runs a command per file; --hostname-bin runs a program;
+# -z / --search-zip runs external decompressors (gzip, xz, zstd, ...) on
+# agent-supplied files; -L / --follow follow symlinks out of the workspace.
+# rg has no option that writes a file.
+args_deny_glob = [
+  "--pre*", "--hostname-bin*",
+  "-z", "-[!-]*z*", "--search-zip",
+  "-L", "-[!-]*L*", "--follow",
+]
+
+[[rules]]
+name = "find inside the workspace"
+tier = "allow"
+argv0 = ["find"]
+args_in_workspace = true
+# -exec/-execdir/-ok/-okdir run commands (GNU and BSD); -delete and
+# GNU -fprint/-fprint0/-fprintf/-fls write files; -L/-follow follow
+# symlinks out; GNU -files0-from reads start points from a file. -H only
+# follows command-line symlinks, which args_in_workspace already resolves.
+args_deny_glob = ["-exec*", "-ok*", "-delete", "-fprint*", "-fls", "-L", "-follow", "-files0-from*"]
+
+[[rules]]
+name = "file(1) inside the workspace"
+tier = "allow"
+argv0 = ["file"]
+args_in_workspace = true
+# -f / --files-from read more names from a file (which can point anywhere);
+# -m / --magic-file loads an agent-supplied magic database (a parser fed
+# attacker data, and arbitrary rules); -C / --compile writes a compiled
+# magic file. Long options accept abbreviations, hence --f* --ma* --co*.
+# Not covered: libmagic also loads ~/.magic(.mgc) from the passed-through
+# HOME; that is data, not code, and the agent should not control HOME.
+args_deny_glob = [
+  "-f", "-[!-]*f*", "--f*",
+  "-m*", "-[!-]*m*", "--ma*",
+  "-C", "-[!-]*C*", "--co*",
+]
+
+# git is advisory_only. Even read-only subcommands run programs named in
+# the repository's own configuration: core.fsmonitor, clean/smudge filter
+# drivers, diff textconv and diff.external, the pager, hooks. If the broker
+# ran `git status` in a repo whose .git/config or .gitattributes the agent
+# can write, the agent would get code execution outside its sandbox. This
+# cannot be neutralised with `-c` overrides (filter drivers have arbitrary
+# names, so any such defence would be partial). So these rules only answer
+# advisory requests -- a harness hook asking whether *it* may run git, which
+# gives nothing new -- and broker-executed git falls through to "ask". A
+# sandboxed agent does not need the broker to read its own workspace's git.
+#
+# Exact subcommand forms only: `status*` used to match `statusx`, and
+# `diff*` matched `difftool --extcmd=...`.
+[[rules]]
+name = "git status and listings (advisory only)"
+tier = "allow"
+advisory_only = true
 argv0 = ["git"]
-args_glob = ["status*", "diff*", "log*", "show*", "branch", "branch -v*", "remote -v", "fetch*"]
+args_glob = [
+  "status", "status *",
+  "branch", "branch --list", "branch -v", "branch -vv", "branch -a", "branch -av",
+  "branch -r", "branch --show-current",
+  "remote -v",
+]
+
+[[rules]]
+name = "git history inside the workspace (advisory only)"
+tier = "allow"
+advisory_only = true
+argv0 = ["git"]
+args_glob = ["diff", "diff *", "log", "log *", "show", "show *"]
+args_in_workspace = true
+# --output writes a file (git accepts abbreviations: --ou, --out, ...);
+# -O / --orderfile read a file; --no-index diffs arbitrary files;
+# --ext-diff runs the configured external diff.
+args_deny_glob = ["--o", "--ou*", "--or*", "-O*", "--no-index", "--ext-diff"]
+
+# `git fetch` is not here: it talks to the network, writes .git, and
+# `--upload-pack=<cmd>` runs a command. It asks by default.
 
 [[rules]]
 name = "git push requires strong approval"
 tier = "ask_strong"
 argv0 = ["git"]
-args_glob = ["push*"]
+# Any argument, so `git -C dir push` and `git -c k=v push` are caught too.
+args_any_glob = ["push"]
 
 [[rules]]
 name = "recursive or forced rm requires strong approval"
 tier = "ask_strong"
 argv0 = ["rm"]
-args_glob = ["-r*", "-f*", "*-rf*", "*-fr*", "-R*"]
+# Per argument, so `rm dir -r` (GNU permutes options) and long forms
+# (--recursive, --force, --no-preserve-root, and their abbreviations) count.
+args_any_glob = ["-[rRf]*", "-[!-]*[rRf]*", "--r*", "--f*", "--n*"]
 
 [[rules]]
 name = "package installs"

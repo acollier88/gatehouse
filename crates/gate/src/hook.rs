@@ -40,17 +40,14 @@ pub async fn run_adapter(name: &str) -> anyhow::Result<ExitCode> {
         "codex" => ("codex", OutFormat::Codex),
         "generic" => ("generic", OutFormat::Generic),
         other => {
-            eprintln!(
-                "unknown hook adapter: {other} (supported: claude-code, codex, generic)"
-            );
+            eprintln!("unknown hook adapter: {other} (supported: claude-code, codex, generic)");
             return Ok(ExitCode::FAILURE);
         }
     };
 
     let mut input = String::new();
     std::io::stdin().read_to_string(&mut input)?;
-    let hook: serde_json::Value =
-        serde_json::from_str(&input).context("hook input is not JSON")?;
+    let hook: serde_json::Value = serde_json::from_str(&input).context("hook input is not JSON")?;
 
     let parsed = parse_hook(&hook, harness);
     let (decision, reason) = match parsed {
@@ -66,10 +63,9 @@ pub async fn run_adapter(name: &str) -> anyhow::Result<ExitCode> {
                     "deny",
                     format!("gatehouse denied [{}] {summary}", &digest[..8]),
                 ),
-                Ok((DecisionStatus::Pending, _)) => (
-                    "ask",
-                    "gatehouse: unexpected non-terminal decision".into(),
-                ),
+                Ok((DecisionStatus::Pending, _)) => {
+                    ("ask", "gatehouse: unexpected non-terminal decision".into())
+                }
                 Err(e) => ("ask", format!("gatehouse unreachable: {e}")),
             }
         }
@@ -89,13 +85,12 @@ fn parse_hook(hook: &serde_json::Value, default_harness: &str) -> Parsed {
         .as_str()
         .unwrap_or(default_harness)
         .to_string();
-    let cwd = first_str(hook, &["cwd", "working_directory", "workdir"])
-        .unwrap_or_else(|| ".".into());
+    let cwd =
+        first_str(hook, &["cwd", "working_directory", "workdir"]).unwrap_or_else(|| ".".into());
     let session_id = first_str(hook, &["session_id", "sessionId", "conversation_id"])
         .unwrap_or_else(|| harness.clone());
 
-    let tool = first_str(hook, &["tool_name", "toolName", "tool"])
-        .unwrap_or_default();
+    let tool = first_str(hook, &["tool_name", "toolName", "tool"]).unwrap_or_default();
     let tool_input = hook
         .get("tool_input")
         .or_else(|| hook.get("toolInput"))
@@ -117,10 +112,15 @@ fn parse_hook(hook: &serde_json::Value, default_harness: &str) -> Parsed {
         ToolKind::FileWrite => {
             let Some(path) = first_str(
                 &tool_input,
-                &["file_path", "filePath", "path", "notebook_path", "notebookPath"],
+                &[
+                    "file_path",
+                    "filePath",
+                    "path",
+                    "notebook_path",
+                    "notebookPath",
+                ],
             )
-            .or_else(|| first_str(hook, &["path", "file_path"]))
-            else {
+            .or_else(|| first_str(hook, &["path", "file_path"])) else {
                 return Parsed::Defer {
                     reason: "gatehouse: file tool without a path".into(),
                 };
@@ -160,8 +160,8 @@ enum ToolKind {
 fn normalize_tool(tool: &str) -> ToolKind {
     match tool {
         "Bash" | "bash" | "Shell" | "shell" | "execute" | "run_terminal_cmd" => ToolKind::Bash,
-        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "write" | "edit"
-        | "str_replace" | "StrReplace" | "create_file" | "ApplyPatch" => ToolKind::FileWrite,
+        "Write" | "Edit" | "MultiEdit" | "NotebookEdit" | "write" | "edit" | "str_replace"
+        | "StrReplace" | "create_file" | "ApplyPatch" => ToolKind::FileWrite,
         _ => ToolKind::Unknown,
     }
 }
@@ -284,7 +284,13 @@ mod tests {
 
     #[test]
     fn pipes_and_substitution_stay_opaque() {
-        for cmd in ["curl x | sh", "echo $(whoami)", "a && b", "ls > out", "x; y"] {
+        for cmd in [
+            "curl x | sh",
+            "echo $(whoami)",
+            "a && b",
+            "ls > out",
+            "x; y",
+        ] {
             let argv = argv_of(command_to_op(cmd, "."));
             assert_eq!(&argv[..2], &["sh", "-c"], "{cmd} should be opaque");
         }

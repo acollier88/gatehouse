@@ -112,8 +112,7 @@ pub fn register_finish(
     ctx: &Ctx,
     body: serde_json::Value,
 ) -> Result<serde_json::Value, String> {
-    let body: RegFinishBody =
-        serde_json::from_value(body).map_err(|e| format!("bad body: {e}"))?;
+    let body: RegFinishBody = serde_json::from_value(body).map_err(|e| format!("bad body: {e}"))?;
     let state = phone
         .reg_states
         .lock()

@@ -42,8 +42,14 @@ pub enum DaemonToRelay {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         device_id: Option<String>,
     },
-    RpcOk { id: String, body: Value },
-    RpcErr { id: String, message: String },
+    RpcOk {
+        id: String,
+        body: Value,
+    },
+    RpcErr {
+        id: String,
+        message: String,
+    },
     /// Best-effort awareness only. Must never be treated as authorization.
     PendingEvent {
         digest_prefix: String,

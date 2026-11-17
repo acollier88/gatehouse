@@ -113,6 +113,42 @@ e2e tests to say what they test ("a finish body with no assertion is
 rejected at the relay") and added hosted-path coverage proving enrollment
 codes and the verification code survive the hosted dispatch.
 
+### S8 — A ctl-socket session grant could approve ask-strong — FIXED (branch `fix/policy-hardening`, unmerged)
+
+`handle_submit` let a matching grant lift both `ask` and `ask_strong`, and
+`CtlMsg::Grant` accepted any glob, so `gate grant "*"` bypassed the passkey.
+Grants now lift `ask` only and must start with a literal program name. An
+unattested envelope is also refused for ask-strong at release time while a
+passkey is enrolled; the no-passkey fallback is audited as
+`approved-unattested`.
+
+### S9 — The allow tier was an execution primitive — FIXED (same branch)
+
+`argv0` matched by basename while the broker executes allowed commands, so
+`./ls` ran a requester-planted file; the "read-only" defaults included
+`find -exec`, `rg --pre`, `git fetch --upload-pack`, `git diff --output`,
+`diff*` (matching `difftool --extcmd`) and `cat` of any path. Allow rules
+now need a trusted argv0 (`[exec] path`), the broker executes the trusted
+resolution, and three per-argument matchers (`args_any_glob`,
+`args_deny_glob`, `args_in_workspace`) let the defaults say what they mean.
+Follow-up: git runs programs from the repository's own config even for
+read-only subcommands, so the default git allow rules are now
+`advisory_only` (decision-only requests; broker-executed git asks). A
+re-audit of the other allow rules added `file -m/-C`, `rg -z` and BSD
+`grep -S` to their deny lists.
+
+### S10 — Workspace / path_prefix checks were raw string prefixes — FIXED (same branch)
+
+`/ws/../etc/passwd`, `/ws-evil/x` and relative paths counted as inside
+`/ws`. Now lexical normalisation + component-wise prefix + symlink
+resolution of the existing ancestor (`gatehouse_proto::contain`).
+
+### S11 — Broker children were unbounded; env passthrough requester-chosen — FIXED (same branch, issue #10)
+
+`[exec] timeout_secs` (process-group kill on Unix, exit 124),
+`[exec] max_output_bytes` (truncation marker), `[exec] env_passthrough`
+(request narrowed before digesting; summary lists passed names).
+
 ## 2. Correctness findings (fixed in PR #3's hardening commits)
 
 - **gate-mcp dropped or mis-answered JSON-RPC notifications.** Only two
@@ -210,6 +246,10 @@ commands.
       CSPRNG; `gate-mcp` uses the same endpoint resolver.
 - [ ] Native/pinned approval client to close S1's residual risk (roadmap
       Phase 9).
+- [ ] S11 residual: Windows timeout kills only the direct child (needs a
+      job object).
+- [ ] The ctl socket itself is unauthenticated beyond OS permissions /
+      IPC token; anything reaching it can still approve `ask` and grant.
 
 ## 7. Minor residuals noted during the PR #4 rework (accepted, unassigned)
 

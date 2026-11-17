@@ -80,10 +80,33 @@ echo "== session grant auto-allows"
 "$bin/gate" grant "true" --for 60s >/dev/null
 "$bin/gate" run -- true || fail "granted command should run without approval"
 
+echo "== wildcard grants are refused"
+if "$bin/gate" grant "*" --for 60s >/dev/null 2>&1; then
+  fail "gate grant '*' must be rejected"
+fi
+
+echo "== a planted ./ls in the cwd is not the allow rule's ls"
+mkdir -p "$tmp/evil"
+printf '#!/bin/sh\necho pwned\n' >"$tmp/evil/ls"
+chmod +x "$tmp/evil/ls"
+pt="$(cd "$tmp/evil" && "$bin/gate" policy test -- ./ls)"
+echo "$pt" | grep -q 'tier=allow' && fail "./ls must not resolve to allow, got: $pt"
+pt="$("$bin/gate" policy test -- find . -exec sh -c id ';')"
+echo "$pt" | grep -q 'tier=allow' && fail "find -exec must not resolve to allow, got: $pt"
+
+echo "== broker-run git is not allowed; the advisory decision is"
+pt="$("$bin/gate" policy test -- git status)"
+echo "$pt" | grep -q '^run: *tier=ask ' || fail "broker-run git status should ask, got: $pt"
+echo "$pt" | grep -q '^advisory: *tier=allow ' || fail "advisory git status should allow, got: $pt"
+
 echo "== claude-code hook: allow tier"
 hookin() { printf '{"session_id":"e2e","cwd":"%s","tool_name":"%s","tool_input":%s}' "$tmp" "$1" "$2"; }
 out="$(hookin Bash '{"command":"ls -la"}' | "$bin/gate" hook claude-code)"
 echo "$out" | grep -q '"permissionDecision":"allow"' || fail "hook should allow ls, got: $out"
+
+echo "== claude-code hook: git status is an advisory allow"
+out="$(hookin Bash '{"command":"git status"}' | "$bin/gate" hook claude-code)"
+echo "$out" | grep -q '"permissionDecision":"allow"' || fail "hook should allow git status, got: $out"
 
 echo "== claude-code hook: deny tier"
 out="$(hookin Bash '{"command":"sudo rm -rf /"}' | "$bin/gate" hook claude-code)"
@@ -181,7 +204,10 @@ if "$bin/gate" audit verify --path "$tampered" >/dev/null 2>&1; then
 fi
 
 echo "== status reports"
-"$bin/gate" status | grep -q "gatehoused up" || fail "status output missing"
+# Capture first: `gate status | grep -q` races (grep exits after the first
+# line, gate's later println hits EPIPE, and pipefail reports failure).
+st="$("$bin/gate" status)"
+echo "$st" | grep -q "gatehoused up" || fail "status output missing: $st"
 
 echo "== passkey enrollment is gated by a one-time code (localhost page)"
 web_port="$(python3 -c 'import json,os; print(json.load(open(os.environ["GATEHOUSE_RUNTIME_DIR"]+"/http.json"))["port"])')"

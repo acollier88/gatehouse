@@ -37,3 +37,7 @@ tokio-tungstenite.workspace = true
 futures-util.workspace = true
 webpki-roots.workspace = true
 aes-gcm.workspace = true
+
+[target.'cfg(unix)'.dependencies]
+# kill(2) on the child's process group when an exec times out.
+libc = "0.2"
