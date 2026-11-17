@@ -46,7 +46,11 @@ impl GateRequest {
     pub fn summary(&self) -> String {
         match &self.op {
             Operation::Exec { argv, cwd } => {
-                format!("Run `{}` in {}", argv.join(" "), cwd)
+                let mut s = format!("Run `{}` in {}", argv.join(" "), cwd);
+                if !self.env_allowlist.is_empty() {
+                    s.push_str(&format!(" with env {}", self.env_allowlist.join(", ")));
+                }
+                s
             }
             Operation::FileWrite { path } => format!("Write file {path}"),
             Operation::Net { host, port } => format!("Connect to {host}:{port}"),
@@ -88,6 +92,22 @@ mod tests {
             *cwd = "/home".into();
         }
         assert_ne!(base.digest().unwrap(), other_cwd.digest().unwrap());
+    }
+
+    #[test]
+    fn summary_names_passed_env_vars() {
+        let mut r = req(&["cargo", "build"]);
+        assert_eq!(r.summary(), "Run `cargo build` in /tmp");
+        r.env_allowlist = vec!["CARGO_TARGET_DIR".into(), "RUST_LOG".into()];
+        assert_eq!(
+            r.summary(),
+            "Run `cargo build` in /tmp with env CARGO_TARGET_DIR, RUST_LOG"
+        );
+        // And the digest covers them.
+        assert_ne!(
+            r.digest().unwrap(),
+            req(&["cargo", "build"]).digest().unwrap()
+        );
     }
 
     #[test]

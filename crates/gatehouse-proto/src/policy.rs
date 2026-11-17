@@ -34,13 +34,46 @@ pub struct ExecPolicy {
     /// which may contain relative or user-writable entries. Entries must be
     /// absolute (`~/` is expanded); others are ignored.
     pub path: Vec<String>,
+    /// Wall-clock limit for one child. On expiry the child (and on Unix its
+    /// whole process group) is killed and the requester gets exit code 124.
+    pub timeout_secs: u64,
+    /// Combined stdout+stderr bytes streamed back per child. Further output
+    /// is read and discarded (so the child does not block on a full pipe)
+    /// and a truncation marker is sent on stderr.
+    pub max_output_bytes: u64,
+    /// Environment variable *names* a request may ask to pass through from
+    /// the daemon's environment. Requested names not listed here are
+    /// dropped before the request is digested, so the approval summary
+    /// shows exactly what will be passed. `PATH` is never passable.
+    pub env_passthrough: Vec<String>,
 }
+
+pub const DEFAULT_EXEC_TIMEOUT_SECS: u64 = 600;
+pub const DEFAULT_MAX_OUTPUT_BYTES: u64 = 16 * 1024 * 1024;
 
 impl Default for ExecPolicy {
     fn default() -> Self {
         Self {
             path: default_exec_path(),
+            timeout_secs: DEFAULT_EXEC_TIMEOUT_SECS,
+            max_output_bytes: DEFAULT_MAX_OUTPUT_BYTES,
+            env_passthrough: vec![],
         }
+    }
+}
+
+impl ExecPolicy {
+    /// The subset of `requested` this policy lets through, sorted and
+    /// deduplicated so equivalent requests digest identically.
+    pub fn effective_env(&self, requested: &[String]) -> Vec<String> {
+        let mut v: Vec<String> = requested
+            .iter()
+            .filter(|n| n.as_str() != "PATH" && self.env_passthrough.contains(n))
+            .cloned()
+            .collect();
+        v.sort();
+        v.dedup();
+        v
     }
 }
 
@@ -813,6 +846,41 @@ mod tests {
         assert_eq!(p.resolve(&exec_req(&["npm", "run", "test"])).0, Tier::Allow);
         assert_eq!(p.resolve(&exec_req(&["npm", "install"])).0, Tier::Ask);
         assert!(!p.exec_path().is_empty());
+    }
+
+    #[test]
+    fn env_passthrough_is_a_policy_decision() {
+        let mut p = default_policy();
+        let req = |names: &[&str]| names.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert!(p
+            .exec
+            .effective_env(&req(&["AWS_SECRET_ACCESS_KEY"]))
+            .is_empty());
+        p.exec.env_passthrough = req(&["CARGO_TARGET_DIR", "PATH"]);
+        assert_eq!(
+            p.exec.effective_env(&req(&[
+                "PATH",
+                "AWS_SECRET_ACCESS_KEY",
+                "CARGO_TARGET_DIR",
+                "CARGO_TARGET_DIR"
+            ])),
+            req(&["CARGO_TARGET_DIR"])
+        );
+    }
+
+    #[test]
+    fn exec_limits_have_defaults_and_parse() {
+        let p = default_policy();
+        assert_eq!(p.exec.timeout_secs, DEFAULT_EXEC_TIMEOUT_SECS);
+        assert_eq!(p.exec.max_output_bytes, DEFAULT_MAX_OUTPUT_BYTES);
+        let p: Policy = toml::from_str(
+            "[exec]\ntimeout_secs = 5\nmax_output_bytes = 100\nenv_passthrough = [\"RUST_LOG\"]\n",
+        )
+        .unwrap();
+        assert_eq!(p.exec.timeout_secs, 5);
+        assert_eq!(p.exec.max_output_bytes, 100);
+        assert_eq!(p.exec.env_passthrough, vec!["RUST_LOG".to_string()]);
+        assert!(!p.exec.path.is_empty(), "unset fields keep their defaults");
     }
 
     #[test]

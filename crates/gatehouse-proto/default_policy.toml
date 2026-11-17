@@ -41,6 +41,18 @@ workspace = []
 # Add e.g. "~/.cargo/bin" if you want approved `cargo` runs to work. Only
 # list directories the agent cannot write to.
 # path = ["/usr/bin", "/bin", "/usr/local/bin"]
+# Kill a child (and on Unix its process group) after this long; the
+# requester sees exit code 124. Default 600.
+# timeout_secs = 600
+# Combined stdout+stderr bytes streamed back; the rest is discarded and a
+# truncation marker is sent on stderr. Default 16 MiB.
+# max_output_bytes = 16777216
+# Environment variable names a request (`gate run --env NAME`) may pass
+# from the daemon's environment. Anything else is dropped before the request
+# is digested, so approval summaries show exactly what passes. HOME, TERM,
+# LANG, USER, SHELL and TMPDIR are always passed; PATH is always the
+# trusted path above. Default: none.
+# env_passthrough = ["CARGO_TARGET_DIR", "RUST_LOG"]
 
 # Metadata only: these print names, sizes and types, never file contents,
 # and have no option that runs another program or writes a file. They are

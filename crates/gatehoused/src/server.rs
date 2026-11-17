@@ -56,7 +56,19 @@ pub async fn run(listener: LocalListener, ctx: Arc<Ctx>) {
     }
 }
 
-async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute: bool) {
+async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, mut request: GateRequest, execute: bool) {
+    // Env passthrough is a policy decision, not the requester's. Narrow the
+    // request *before* digesting so the summary every approver reads, and
+    // the digest they approve, name exactly the variables that will pass.
+    let wanted = std::mem::take(&mut request.env_allowlist);
+    request.env_allowlist = ctx.policy.exec.effective_env(&wanted);
+    if wanted.len() != request.env_allowlist.len() {
+        let dropped: Vec<&String> = wanted
+            .iter()
+            .filter(|n| !request.env_allowlist.contains(n))
+            .collect();
+        warn!("dropping env vars not in policy [exec] env_passthrough: {dropped:?}");
+    }
     let digest = match request.digest() {
         Ok(d) => d,
         Err(e) => {
@@ -293,16 +305,20 @@ async fn run_child(w: &Writer, policy: &gatehouse_proto::Policy, request: &GateR
     if let Ok(path) = std::env::join_paths(policy.exec_path()) {
         cmd.env("PATH", path);
     }
+    // Re-filter here too, so no caller can hand run_child an unvetted list.
+    let passed = policy.exec.effective_env(&request.env_allowlist);
     for key in BASE_ENV
         .iter()
         .copied()
-        .chain(request.env_allowlist.iter().map(String::as_str))
-        .filter(|k| *k != "PATH")
+        .chain(passed.iter().map(String::as_str))
     {
         if let Ok(val) = std::env::var(key) {
             cmd.env(key, val);
         }
     }
+    // Own process group, so a timeout can kill everything the child spawned.
+    #[cfg(unix)]
+    cmd.process_group(0);
 
     let mut child = match cmd.spawn() {
         Ok(c) => c,
@@ -318,23 +334,122 @@ async fn run_child(w: &Writer, policy: &gatehouse_proto::Policy, request: &GateR
             return;
         }
     };
+    let pid = child.id();
 
+    let limit = OutputLimit::new(policy.exec.max_output_bytes);
     let mut stdout = child.stdout.take().expect("piped");
     let mut stderr = child.stderr.take().expect("piped");
     let (out_w, err_w) = (w.clone(), w.clone());
-    let out_task = tokio::spawn(async move {
-        pump(&mut stdout, &out_w, false).await;
+    let (out_l, err_l) = (limit.clone(), limit.clone());
+    let mut out_task = tokio::spawn(async move {
+        pump(&mut stdout, &out_w, false, &out_l).await;
     });
-    let err_task = tokio::spawn(async move {
-        pump(&mut stderr, &err_w, true).await;
+    let mut err_task = tokio::spawn(async move {
+        pump(&mut stderr, &err_w, true, &err_l).await;
     });
-    let _ = out_task.await;
-    let _ = err_task.await;
-    let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
+
+    let timeout = std::time::Duration::from_secs(policy.exec.timeout_secs.max(1));
+    let finished = tokio::time::timeout(timeout, async {
+        let _ = (&mut out_task).await;
+        let _ = (&mut err_task).await;
+        child.wait().await
+    })
+    .await;
+    let code = match finished {
+        Ok(status) => status.ok().map(exit_code).unwrap_or(-1),
+        Err(_) => {
+            kill_tree(pid, &mut child).await;
+            out_task.abort();
+            err_task.abort();
+            warn!("child timed out after {}s; killed", timeout.as_secs());
+            let note = format!(
+                "\n[gatehouse: killed after {}s timeout (policy [exec] timeout_secs)]\n",
+                timeout.as_secs()
+            );
+            send(w, &stderr_msg(note.as_bytes())).await;
+            EXIT_TIMED_OUT
+        }
+    };
     send(w, &DaemonMsg::Exit { code }).await;
 }
 
-async fn pump<R: tokio::io::AsyncRead + Unpin>(reader: &mut R, w: &Writer, is_err: bool) {
+/// Exit code reported when the broker killed the child for running too
+/// long, matching coreutils `timeout(1)`.
+pub const EXIT_TIMED_OUT: i32 = 124;
+
+/// Exit code for a status, with Unix signals mapped to `128 + signo` like a
+/// shell does (otherwise a signal death has no code and looked like 0 to
+/// `gate`, which clamps negatives).
+fn exit_code(status: std::process::ExitStatus) -> i32 {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return 128 + sig;
+        }
+    }
+    status.code().unwrap_or(-1)
+}
+
+/// Kill the child and, on Unix, its whole process group (the child was
+/// made a group leader at spawn). On Windows only the direct child is
+/// terminated; grandchildren survive (no job object yet).
+async fn kill_tree(pid: Option<u32>, child: &mut tokio::process::Child) {
+    #[cfg(unix)]
+    if let Some(pid) = pid.and_then(|p| i32::try_from(p).ok()) {
+        // SAFETY: plain syscall; a negative pid addresses the process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    #[cfg(not(unix))]
+    let _ = pid;
+    let _ = child.start_kill();
+    let _ = child.wait().await;
+}
+
+/// Combined stdout+stderr byte budget shared by both pumps.
+#[derive(Clone)]
+struct OutputLimit {
+    max: u64,
+    used: Arc<std::sync::atomic::AtomicU64>,
+    marked: Arc<std::sync::atomic::AtomicBool>,
+}
+
+impl OutputLimit {
+    fn new(max: u64) -> Self {
+        Self {
+            max,
+            used: Arc::default(),
+            marked: Arc::default(),
+        }
+    }
+
+    /// How many of the next `n` bytes may still be forwarded.
+    fn take(&self, n: usize) -> usize {
+        use std::sync::atomic::Ordering;
+        let before = self.used.fetch_add(n as u64, Ordering::SeqCst);
+        self.max.saturating_sub(before).min(n as u64) as usize
+    }
+
+    /// True exactly once, the first time output is cut.
+    fn first_truncation(&self) -> bool {
+        !self.marked.swap(true, std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+fn stderr_msg(bytes: &[u8]) -> DaemonMsg {
+    DaemonMsg::Stderr {
+        b64: base64::engine::general_purpose::STANDARD.encode(bytes),
+    }
+}
+
+async fn pump<R: tokio::io::AsyncRead + Unpin>(
+    reader: &mut R,
+    w: &Writer,
+    is_err: bool,
+    limit: &OutputLimit,
+) {
     use tokio::io::AsyncReadExt;
     let b64 = base64::engine::general_purpose::STANDARD;
     let mut buf = vec![0u8; 8192];
@@ -342,13 +457,25 @@ async fn pump<R: tokio::io::AsyncRead + Unpin>(reader: &mut R, w: &Writer, is_er
         match reader.read(&mut buf).await {
             Ok(0) | Err(_) => break,
             Ok(n) => {
-                let data = b64.encode(&buf[..n]);
-                let msg = if is_err {
-                    DaemonMsg::Stderr { b64: data }
-                } else {
-                    DaemonMsg::Stdout { b64: data }
-                };
-                send(w, &msg).await;
+                let keep = limit.take(n);
+                if keep > 0 {
+                    let data = b64.encode(&buf[..keep]);
+                    let msg = if is_err {
+                        DaemonMsg::Stderr { b64: data }
+                    } else {
+                        DaemonMsg::Stdout { b64: data }
+                    };
+                    send(w, &msg).await;
+                }
+                // Past the cap: keep draining so the child never blocks on a
+                // full pipe (the timeout bounds how long that can go on).
+                if keep < n && limit.first_truncation() {
+                    let note = format!(
+                        "\n[gatehouse: output truncated at {} bytes (policy [exec] max_output_bytes)]\n",
+                        limit.max
+                    );
+                    send(w, &stderr_msg(note.as_bytes())).await;
+                }
             }
         }
     }
@@ -620,6 +747,139 @@ mod tests {
         let msgs = submit(&ctx, req, true).await;
         assert_eq!(statuses(&msgs).last().unwrap().1, DecisionStatus::Denied);
         assert!(stdout_of(&msgs).is_empty());
+    }
+
+    fn stderr_of(msgs: &[DaemonMsg]) -> String {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        msgs.iter()
+            .filter_map(|m| match m {
+                DaemonMsg::Stderr { b64: d } => Some(b64.decode(d).unwrap()),
+                _ => None,
+            })
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .collect()
+    }
+
+    /// A policy allowing one test script, run from a trusted temp dir (plus
+    /// the system dirs so the script can use sleep/echo).
+    #[cfg(unix)]
+    fn script_policy(name: &str, body: &str, exec_toml: &str) -> (Policy, std::path::PathBuf) {
+        let trusted = scratch("bin");
+        script(&trusted, name, body);
+        let mut policy: Policy = toml::from_str(&format!(
+            "[exec]\n{exec_toml}\n[[rules]]\nname = \"t\"\ntier = \"allow\"\nargv0 = [\"{name}\"]\n"
+        ))
+        .unwrap();
+        let mut path = vec![trusted.to_string_lossy().into_owned()];
+        path.extend(["/bin".to_string(), "/usr/bin".to_string()]);
+        policy.exec.path = path;
+        (policy, trusted)
+    }
+
+    /// Issue #10: a child that never exits is killed, with its process
+    /// group, and the requester sees exit 124 plus a note on stderr.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn timeout_kills_child_and_its_process_group() {
+        let pidfile = scratch("pid").join("grandchild.pid");
+        let body = format!("sleep 300 &\necho $! > {}\nsleep 300", pidfile.display());
+        let (policy, _) = script_policy("hang", &body, "timeout_secs = 1");
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let started = Instant::now();
+        let msgs = submit(&ctx, exec(&["hang"]), true).await;
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "{:?}",
+            started.elapsed()
+        );
+        assert_eq!(exit_of(&msgs), Some(EXIT_TIMED_OUT));
+        assert!(
+            stderr_of(&msgs).contains("killed after 1s timeout"),
+            "{msgs:?}"
+        );
+
+        let grandchild: i32 = std::fs::read_to_string(&pidfile)
+            .unwrap()
+            .trim()
+            .parse()
+            .unwrap();
+        let mut alive = true;
+        for _ in 0..100 {
+            // SAFETY: signal 0 only probes for existence.
+            if unsafe { libc::kill(grandchild, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        assert!(
+            !alive,
+            "background grandchild {grandchild} survived the timeout"
+        );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn output_is_capped_with_a_marker() {
+        let (policy, _) = script_policy(
+            "chatty",
+            "i=0; while [ $i -lt 2000 ]; do echo 0123456789; i=$((i+1)); done; echo done >&2",
+            "max_output_bytes = 100",
+        );
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let msgs = submit(&ctx, exec(&["chatty"]), true).await;
+        let out = stdout_of(&msgs);
+        assert_eq!(out.len(), 100, "stdout should be cut at the cap");
+        let err = stderr_of(&msgs);
+        assert!(err.contains("output truncated at 100 bytes"), "{err}");
+        assert!(!err.contains("done"), "stderr counts toward the same cap");
+        // The child ran to completion (drained, not blocked or killed).
+        assert_eq!(exit_of(&msgs), Some(0));
+    }
+
+    /// Env passthrough: only names the policy lists reach the child, and the
+    /// decision summary (what approvers read) names exactly those.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn env_passthrough_is_filtered_by_policy_and_shown_in_summary() {
+        // Edition 2021: set_var is safe; names are unique to this test.
+        std::env::set_var("GH_TEST_PASS_OK", "visible");
+        std::env::set_var("GH_TEST_PASS_SECRET", "leaked");
+        let (policy, _) = script_policy(
+            "envy",
+            "echo ok=$GH_TEST_PASS_OK secret=$GH_TEST_PASS_SECRET path=$PATH",
+            "env_passthrough = [\"GH_TEST_PASS_OK\"]",
+        );
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let mut req = exec(&["envy"]);
+        req.env_allowlist = vec![
+            "GH_TEST_PASS_SECRET".into(),
+            "GH_TEST_PASS_OK".into(),
+            "PATH".into(),
+        ];
+        let msgs = submit(&ctx, req, true).await;
+        let out = stdout_of(&msgs);
+        assert!(out.starts_with("ok=visible secret= "), "{out}");
+        assert!(!out.contains("leaked"));
+        let summary = msgs
+            .iter()
+            .find_map(|m| match m {
+                DaemonMsg::Decision { summary, .. } => Some(summary.clone()),
+                _ => None,
+            })
+            .unwrap();
+        assert!(summary.ends_with("with env GH_TEST_PASS_OK"), "{summary}");
+        assert!(!summary.contains("SECRET"));
+    }
+
+    #[test]
+    fn signal_deaths_are_not_reported_as_success() {
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::ExitStatusExt;
+            assert_eq!(exit_code(std::process::ExitStatus::from_raw(9)), 128 + 9);
+            assert_eq!(exit_code(std::process::ExitStatus::from_raw(3 << 8)), 3);
+        }
     }
 
     /// With a passkey enrolled the ctl path refuses ask-strong, and an
