@@ -49,7 +49,10 @@ fn handle(ctx: &Arc<Ctx>, msg: CtlMsg, started: Instant) -> CtlResp {
         },
         CtlMsg::Approve { digest_prefix } => decide(ctx, &digest_prefix, true),
         CtlMsg::Deny { digest_prefix } => decide(ctx, &digest_prefix, false),
-        CtlMsg::Grant { argv_glob, ttl_secs } => {
+        CtlMsg::Grant {
+            argv_glob,
+            ttl_secs,
+        } => {
             ctx.state
                 .add_grant(argv_glob.clone(), Duration::from_secs(ttl_secs));
             CtlResp::Ok {
@@ -64,7 +67,10 @@ fn handle(ctx: &Arc<Ctx>, msg: CtlMsg, started: Instant) -> CtlResp {
         },
         CtlMsg::EnrollCode => {
             let code = ctx.enroll_codes.issue();
-            info!("enrollment code issued (valid {}s)", crate::enroll::CODE_TTL.as_secs());
+            info!(
+                "enrollment code issued (valid {}s)",
+                crate::enroll::CODE_TTL.as_secs()
+            );
             CtlResp::EnrollCode {
                 code,
                 ttl_secs: crate::enroll::CODE_TTL.as_secs(),
@@ -80,9 +86,9 @@ fn decide(ctx: &Arc<Ctx>, digest_prefix: &str, approve: bool) -> CtlResp {
     // stay allowed from anywhere.
     if approve {
         let pending = ctx.state.pending.lock().unwrap();
-        let is_strong = pending
-            .iter()
-            .any(|(d, p)| d.starts_with(digest_prefix) && p.tier == gatehouse_proto::Tier::AskStrong);
+        let is_strong = pending.iter().any(|(d, p)| {
+            d.starts_with(digest_prefix) && p.tier == gatehouse_proto::Tier::AskStrong
+        });
         if is_strong && ctx.passkeys_enrolled() {
             let url = ctx.approval_url().unwrap_or_else(|| "page not up".into());
             return CtlResp::Error {

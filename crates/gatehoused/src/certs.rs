@@ -4,12 +4,10 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context};
 use gatehouse_proto::{paths, RelayConfig};
-use rcgen::{
-    BasicConstraints, CertificateParams, IsCa, KeyPair, SanType, PKCS_ECDSA_P256_SHA256,
-};
+use rcgen::{BasicConstraints, CertificateParams, IsCa, KeyPair, SanType, PKCS_ECDSA_P256_SHA256};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer};
-use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use rustls::server::WebPkiClientVerifier;
+use rustls::{ClientConfig, RootCertStore, ServerConfig};
 use tracing::info;
 
 const CA_CERT: &str = "ca.pem";
@@ -40,8 +38,9 @@ impl RelayMaterial {
     pub fn load() -> anyhow::Result<Self> {
         let dir = paths::relay_dir();
         let cfg_path = paths::relay_config_path();
-        let text = std::fs::read_to_string(&cfg_path)
-            .with_context(|| format!("missing {}; run: gatehoused relay-init", cfg_path.display()))?;
+        let text = std::fs::read_to_string(&cfg_path).with_context(|| {
+            format!("missing {}; run: gatehoused relay-init", cfg_path.display())
+        })?;
         let config: RelayConfig = serde_json::from_str(&text)?;
         Ok(Self { config, dir })
     }
@@ -88,15 +87,13 @@ impl RelayMaterial {
             rcgen::KeyUsagePurpose::DigitalSignature,
             rcgen::KeyUsagePurpose::KeyEncipherment,
         ];
-        relay_params.extended_key_usages =
-            vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
+        relay_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ServerAuth];
         let relay_cert = relay_params.signed_by(&relay_key, &ca_cert, &ca_key)?;
 
         let daemon_key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
         let mut daemon_params = CertificateParams::new(vec!["gatehouse-daemon".into()])?;
         daemon_params.key_usages = vec![rcgen::KeyUsagePurpose::DigitalSignature];
-        daemon_params.extended_key_usages =
-            vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
+        daemon_params.extended_key_usages = vec![rcgen::ExtendedKeyUsagePurpose::ClientAuth];
         let daemon_cert = daemon_params.signed_by(&daemon_key, &ca_cert, &ca_key)?;
 
         write_pem(dir.join(CA_CERT), ca_cert.pem())?;
@@ -235,7 +232,9 @@ fn load_key(path: &Path) -> anyhow::Result<PrivateKeyDer<'static>> {
         .ok_or_else(|| anyhow::anyhow!("no private key in {}", path.display()))?;
     // Ensure we own a PKCS8-shaped key for rustls.
     Ok(match key {
-        PrivateKeyDer::Pkcs8(k) => PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(k.secret_pkcs8_der().to_vec())),
+        PrivateKeyDer::Pkcs8(k) => {
+            PrivateKeyDer::Pkcs8(PrivatePkcs8KeyDer::from(k.secret_pkcs8_der().to_vec()))
+        }
         other => other,
     })
 }

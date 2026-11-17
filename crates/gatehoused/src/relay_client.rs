@@ -399,7 +399,13 @@ mod tests {
     fn register_start_over_the_hosted_dispatch_still_needs_a_code() {
         let (ctx, _digest, _nonce) = ctx_with_pending();
         let phone = PhoneAuth::new(&relay_config()).unwrap();
-        assert!(dispatch(&ctx, &phone, RelayMethod::RegisterStart, serde_json::json!({})).is_err());
+        assert!(dispatch(
+            &ctx,
+            &phone,
+            RelayMethod::RegisterStart,
+            serde_json::json!({})
+        )
+        .is_err());
         assert!(dispatch(
             &ctx,
             &phone,

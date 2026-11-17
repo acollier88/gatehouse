@@ -67,11 +67,19 @@ pub enum DaemonMsg {
         summary: String,
     },
     /// Base64 chunk of child stdout (broker-executes mode only).
-    Stdout { b64: String },
+    Stdout {
+        b64: String,
+    },
     /// Base64 chunk of child stderr (broker-executes mode only).
-    Stderr { b64: String },
-    Exit { code: i32 },
-    Error { message: String },
+    Stderr {
+        b64: String,
+    },
+    Exit {
+        code: i32,
+    },
+    Error {
+        message: String,
+    },
 }
 
 /// Operator commands on the ctl socket.
@@ -80,10 +88,17 @@ pub enum DaemonMsg {
 pub enum CtlMsg {
     Pending,
     /// Approve a pending request by unique digest prefix.
-    Approve { digest_prefix: String },
-    Deny { digest_prefix: String },
+    Approve {
+        digest_prefix: String,
+    },
+    Deny {
+        digest_prefix: String,
+    },
     /// Session grant: argv glob auto-allowed until the TTL lapses.
-    Grant { argv_glob: String, ttl_secs: u64 },
+    Grant {
+        argv_glob: String,
+        ttl_secs: u64,
+    },
     Status,
     /// Mint a one-time code that authorises one passkey enrollment.
     EnrollCode,
@@ -107,15 +122,24 @@ pub struct GrantInfo {
 #[derive(Serialize, Deserialize, Clone, Debug)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum CtlResp {
-    Ok { message: String },
-    Pending { entries: Vec<PendingEntry> },
+    Ok {
+        message: String,
+    },
+    Pending {
+        entries: Vec<PendingEntry>,
+    },
     /// A one-time enrollment code and how long it stays valid.
-    EnrollCode { code: String, ttl_secs: u64 },
+    EnrollCode {
+        code: String,
+        ttl_secs: u64,
+    },
     Status {
         version: u32,
         pending: usize,
         grants: Vec<GrantInfo>,
         uptime_secs: u64,
     },
-    Error { message: String },
+    Error {
+        message: String,
+    },
 }

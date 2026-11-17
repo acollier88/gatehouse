@@ -104,7 +104,9 @@ pub fn register(device_id: &str, token: &str) -> anyhow::Result<String> {
     let hash = token_hash(token);
     let (token_ct, nonce) = encrypt_token(token)?;
     let mut store = load();
-    store.devices.retain(|d| d.device_id != device_id && d.token_hash != hash);
+    store
+        .devices
+        .retain(|d| d.device_id != device_id && d.token_hash != hash);
     store.devices.push(ApnsRecord {
         device_id: device_id.to_string(),
         token_hash: hash.clone(),
@@ -177,7 +179,11 @@ mod tests {
         assert_ne!(hash, token);
         assert!(!hash.contains(token));
         let store = load();
-        let rec = store.devices.iter().find(|d| d.device_id == "phone-1").unwrap();
+        let rec = store
+            .devices
+            .iter()
+            .find(|d| d.device_id == "phone-1")
+            .unwrap();
         assert_eq!(decrypt_token(rec).unwrap(), token);
         assert!(unregister("phone-1").unwrap());
         let _ = std::fs::remove_dir_all(dir);

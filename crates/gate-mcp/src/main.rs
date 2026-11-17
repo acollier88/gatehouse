@@ -161,7 +161,11 @@ async fn gated_exec(args: &Value) -> anyhow::Result<Value> {
     };
     match submit(request, true).await? {
         SubmitResult::Denied { summary } => Ok(tool_error(&format!("denied: {summary}"))),
-        SubmitResult::Output { stdout, stderr, code } => {
+        SubmitResult::Output {
+            stdout,
+            stderr,
+            code,
+        } => {
             let mut text = String::new();
             if !stdout.is_empty() {
                 text.push_str(&stdout);
@@ -248,7 +252,9 @@ fn truncate_body(text: &str) -> String {
 }
 
 enum SubmitResult {
-    Denied { summary: String },
+    Denied {
+        summary: String,
+    },
     Output {
         stdout: String,
         stderr: String,
@@ -345,7 +351,9 @@ mod tests {
             "some/unknown/notification",
         ] {
             assert!(
-                resp(json!({"jsonrpc":"2.0","method":method})).await.is_none(),
+                resp(json!({"jsonrpc":"2.0","method":method}))
+                    .await
+                    .is_none(),
                 "{method} must not be answered"
             );
         }

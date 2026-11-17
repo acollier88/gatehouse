@@ -55,7 +55,10 @@ struct RelayState {
 pub async fn run(listen: SocketAddr, daemon_listen: SocketAddr) -> anyhow::Result<()> {
     let material = RelayMaterial::load()?;
     info!("relay phone URL: {}", material.phone_url());
-    info!("rp_id={} origin={}", material.config.rp_id, material.config.origin);
+    info!(
+        "rp_id={} origin={}",
+        material.config.rp_id, material.config.origin
+    );
     info!("daemon_auth={}", material.daemon_auth());
 
     let state = Arc::new(RelayState {
@@ -74,7 +77,10 @@ pub async fn run(listen: SocketAddr, daemon_listen: SocketAddr) -> anyhow::Resul
         .route("/api/approve/start", post(api_approve_start))
         .route("/api/approve/finish", post(api_approve_finish))
         .route("/api/deny", post(api_deny))
-        .route("/api/devices/apns", post(api_apns_register).delete(api_apns_delete))
+        .route(
+            "/api/devices/apns",
+            post(api_apns_register).delete(api_apns_delete),
+        )
         .route("/ws", get(daemon_ws_token))
         .with_state(state.clone());
 
@@ -256,7 +262,9 @@ async fn api_register_start(
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let device = phone_device(&state, &headers, &query)?;
     // Carries the one-time enrollment code; the daemon validates it.
-    let body = body.map(|Json(v)| v).unwrap_or_else(|| serde_json::json!({}));
+    let body = body
+        .map(|Json(v)| v)
+        .unwrap_or_else(|| serde_json::json!({}));
     Ok(Json(
         rpc(&state, &device, RelayMethod::RegisterStart, body).await?,
     ))
@@ -329,7 +337,9 @@ async fn api_apns_register(
     let device = phone_device(&state, &headers, &query)?;
     let id = body.device_id.unwrap_or(device);
     let hash = crate::apns::register(&id, &body.token).map_err(|_| StatusCode::BAD_REQUEST)?;
-    Ok(Json(serde_json::json!({ "registered": true, "token_hash": hash })))
+    Ok(Json(
+        serde_json::json!({ "registered": true, "token_hash": hash }),
+    ))
 }
 
 async fn api_apns_delete(
@@ -338,7 +348,8 @@ async fn api_apns_delete(
     Query(query): Query<DeviceQuery>,
 ) -> Result<Json<serde_json::Value>, StatusCode> {
     let device = phone_device(&state, &headers, &query)?;
-    let removed = crate::apns::unregister(&device).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
+    let removed =
+        crate::apns::unregister(&device).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     Ok(Json(serde_json::json!({ "removed": removed })))
 }
 
@@ -382,7 +393,9 @@ fn hello_identity(authenticated: &str, claimed: Option<&str>) -> String {
 
 fn bearer_token(headers: &HeaderMap) -> Option<String> {
     let raw = headers.get("authorization")?.to_str().ok()?;
-    let token = raw.strip_prefix("Bearer ").or_else(|| raw.strip_prefix("bearer "))?;
+    let token = raw
+        .strip_prefix("Bearer ")
+        .or_else(|| raw.strip_prefix("bearer "))?;
     if token.is_empty() {
         None
     } else {

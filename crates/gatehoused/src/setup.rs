@@ -51,16 +51,13 @@ pub fn run_relay_init(opts: InitOpts) -> anyhow::Result<()> {
     }
 
     let (rp_id, origin, transport) = resolve_endpoints(&opts)?;
-    let daemon_auth = opts
-        .daemon_auth
-        .clone()
-        .or_else(|| {
-            if opts.hosted || transport == "hosted" {
-                Some("token".into())
-            } else {
-                Some("mtls".into())
-            }
-        });
+    let daemon_auth = opts.daemon_auth.clone().or_else(|| {
+        if opts.hosted || transport == "hosted" {
+            Some("token".into())
+        } else {
+            Some("mtls".into())
+        }
+    });
     let keep = if opts.keep_token {
         RelayMaterial::load().ok().map(|m| m.config.phone_token)
     } else {
@@ -143,7 +140,11 @@ fn resolve_endpoints(opts: &InitOpts) -> anyhow::Result<(String, String, String)
         } else {
             "custom"
         };
-        return Ok((rp.clone(), origin.trim_end_matches('/').to_string(), transport.into()));
+        return Ok((
+            rp.clone(),
+            origin.trim_end_matches('/').to_string(),
+            transport.into(),
+        ));
     }
 
     let ts = detect_tailscale_dns();
@@ -164,7 +165,11 @@ fn resolve_endpoints(opts: &InitOpts) -> anyhow::Result<(String, String, String)
         } else {
             "custom"
         };
-        return Ok((rp.clone(), origin.trim_end_matches('/').to_string(), transport.into()));
+        return Ok((
+            rp.clone(),
+            origin.trim_end_matches('/').to_string(),
+            transport.into(),
+        ));
     }
 
     // Interactive / guided path.
@@ -180,7 +185,9 @@ fn resolve_endpoints(opts: &InitOpts) -> anyhow::Result<(String, String, String)
     }
 
     println!("Gatehouse phone relay setup");
-    println!("Passkeys bind to a hostname (WebAuthn RP ID). Pick how phones will reach this machine.\n");
+    println!(
+        "Passkeys bind to a hostname (WebAuthn RP ID). Pick how phones will reach this machine.\n"
+    );
 
     if let Some(host) = &ts {
         println!("Detected Tailscale MagicDNS: {host}");

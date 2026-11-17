@@ -3,9 +3,7 @@
 use std::sync::Arc;
 
 use base64::Engine;
-use gatehouse_proto::{
-    AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation, Tier,
-};
+use gatehouse_proto::{AgentMsg, DaemonMsg, DecisionStatus, GateRequest, Operation, Tier};
 use tokio::io::{AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
 use tokio::sync::oneshot;
 use tracing::{info, warn};
@@ -60,7 +58,13 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
     let digest = match request.digest() {
         Ok(d) => d,
         Err(e) => {
-            send(w, &DaemonMsg::Error { message: e.to_string() }).await;
+            send(
+                w,
+                &DaemonMsg::Error {
+                    message: e.to_string(),
+                },
+            )
+            .await;
             return;
         }
     };
@@ -255,12 +259,7 @@ async fn run_child(w: &Writer, request: &GateRequest) {
     });
     let _ = out_task.await;
     let _ = err_task.await;
-    let code = child
-        .wait()
-        .await
-        .ok()
-        .and_then(|s| s.code())
-        .unwrap_or(-1);
+    let code = child.wait().await.ok().and_then(|s| s.code()).unwrap_or(-1);
     send(w, &DaemonMsg::Exit { code }).await;
 }
 

@@ -76,8 +76,8 @@ pub fn bind_challenge(
     let encoded = serde_json::Value::String(b64(challenge));
     rcr.public_key.challenge = challenge.to_vec().into();
 
-    let mut value =
-        serde_json::to_value(&state).map_err(|e| format!("ceremony state not serializable: {e}"))?;
+    let mut value = serde_json::to_value(&state)
+        .map_err(|e| format!("ceremony state not serializable: {e}"))?;
     let slot = value
         .get_mut("ast")
         .and_then(|ast| ast.get_mut("challenge"))
@@ -104,11 +104,7 @@ pub fn assertion_challenge(cred: &PublicKeyCredential) -> Result<Vec<u8>, String
 
 /// Fail closed unless the signed challenge is exactly the one derived from the
 /// request being released.
-pub fn check_bound(
-    cred: &PublicKeyCredential,
-    digest: &str,
-    nonce: &str,
-) -> Result<(), String> {
+pub fn check_bound(cred: &PublicKeyCredential, digest: &str, nonce: &str) -> Result<(), String> {
     let signed = assertion_challenge(cred)?;
     let expected = derive_challenge(digest, nonce);
     if signed.len() == expected.len() && bool::from(signed.ct_eq(&expected)) {

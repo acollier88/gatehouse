@@ -100,8 +100,7 @@ pub fn write_endpoint(path: &std::path::Path, ep: &Endpoint) -> std::io::Result<
 
 pub fn read_endpoint(path: &std::path::Path) -> std::io::Result<Endpoint> {
     let text = std::fs::read_to_string(path)?;
-    serde_json::from_str(&text)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
+    serde_json::from_str(&text).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
 /// Resolve the agent endpoint: endpoint JSON if present, else legacy Unix sock.

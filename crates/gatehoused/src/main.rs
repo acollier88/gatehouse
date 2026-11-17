@@ -159,8 +159,7 @@ pub struct PendingWake {
 
 impl Ctx {
     pub fn passkeys_enrolled(&self) -> bool {
-        !self.passkeys.lock().unwrap().is_empty()
-            || !self.phone_passkeys.lock().unwrap().is_empty()
+        !self.passkeys.lock().unwrap().is_empty() || !self.phone_passkeys.lock().unwrap().is_empty()
     }
 
     /// Prefer the phone relay URL when available; else localhost page.

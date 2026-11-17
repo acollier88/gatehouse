@@ -13,7 +13,10 @@ use gatehouse_proto::{
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 
 #[derive(Parser)]
-#[command(name = "gate", about = "Gatehouse client — route agent operations through the approval broker")]
+#[command(
+    name = "gate",
+    about = "Gatehouse client — route agent operations through the approval broker"
+)]
 struct Cli {
     #[command(subcommand)]
     cmd: Cmd,
@@ -101,13 +104,21 @@ async fn main() -> anyhow::Result<ExitCode> {
     let cli = Cli::parse();
     match cli.cmd {
         Cmd::Run { harness, env, argv } => submit(harness, env, argv, true, false).await,
-        Cmd::Ask { harness, json, argv } => submit(harness, vec![], argv, false, json).await,
+        Cmd::Ask {
+            harness,
+            json,
+            argv,
+        } => submit(harness, vec![], argv, false, json).await,
         Cmd::Pending => ctl(CtlMsg::Pending).await,
         Cmd::Approve { digest_prefix } => ctl(CtlMsg::Approve { digest_prefix }).await,
         Cmd::Deny { digest_prefix } => ctl(CtlMsg::Deny { digest_prefix }).await,
         Cmd::Grant { argv_glob, ttl } => {
             let ttl_secs = parse_ttl(&ttl)?;
-            ctl(CtlMsg::Grant { argv_glob, ttl_secs }).await
+            ctl(CtlMsg::Grant {
+                argv_glob,
+                ttl_secs,
+            })
+            .await
         }
         Cmd::Status => ctl(CtlMsg::Status).await,
         Cmd::Enroll => {
@@ -148,8 +159,7 @@ fn policy_test(argv: Vec<String>) -> anyhow::Result<ExitCode> {
     let policy = if path.exists() {
         Policy::load(&path)?
     } else {
-        toml::from_str(gatehouse_proto::policy::DEFAULT_POLICY)
-            .context("parse default policy")?
+        toml::from_str(gatehouse_proto::policy::DEFAULT_POLICY).context("parse default policy")?
     };
     let cwd = std::env::current_dir()?
         .to_str()
@@ -177,7 +187,11 @@ fn open_approval_page() -> anyhow::Result<ExitCode> {
             phone_token: String,
         }
         let cfg: RelayCfg = serde_json::from_str(&text)?;
-        format!("{}/?t={}", cfg.origin.trim_end_matches('/'), cfg.phone_token)
+        format!(
+            "{}/?t={}",
+            cfg.origin.trim_end_matches('/'),
+            cfg.phone_token
+        )
     } else {
         #[derive(serde::Deserialize)]
         struct HttpInfo {
@@ -242,7 +256,12 @@ async fn submit(
     let mut stderr = std::io::stderr();
     while let Some(line) = lines.next_line().await? {
         match serde_json::from_str::<DaemonMsg>(&line)? {
-            DaemonMsg::Decision { digest, tier, status, summary } => match status {
+            DaemonMsg::Decision {
+                digest,
+                tier,
+                status,
+                summary,
+            } => match status {
                 DecisionStatus::Pending => {
                     eprintln!(
                         "gate: waiting for approval [{}] ({tier}): {summary}",
@@ -330,7 +349,12 @@ async fn ctl(msg: CtlMsg) -> anyhow::Result<ExitCode> {
             println!("type it on the approval page when enrolling a passkey");
             Ok(ExitCode::SUCCESS)
         }
-        CtlResp::Status { version, pending, grants, uptime_secs } => {
+        CtlResp::Status {
+            version,
+            pending,
+            grants,
+            uptime_secs,
+        } => {
             println!("gatehoused up {uptime_secs}s (protocol v{version})");
             println!("pending approvals: {pending}");
             if grants.is_empty() {
