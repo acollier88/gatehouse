@@ -143,17 +143,28 @@ an allow rule must not be a code-execution or file-exfiltration primitive:
   The broker executes the trusted resolution of a bare name and gives the
   child that trusted path as `PATH`.
 - Default allow rules are limited to metadata tools anywhere, and
-  content-reading tools (`cat`, `grep`, `rg`, `find`, `git diff/log/show`, …)
+  content-reading tools (`cat`, `head`, `tail`, `grep`, `rg`, `find`, `file`)
   only when the cwd and every path-like argument are inside a configured
-  `workspace`, with option denylists (`find -exec/-delete`, `rg --pre`,
-  `git --output/--no-index`, …). `git fetch` is no longer allowed.
-- **Not covered:** git executes programs named in a repository's own config
-  (`core.fsmonitor`, filter drivers, textconv). An agent that can write a
-  repo's `.git/config` or `.gitattributes` gets code execution through the
-  default git allow rules; remove them if the agent can write `.git`. The
-  option denylists are per-tool knowledge and can miss options in other
-  versions of those tools. Metadata tools reveal which files exist
-  outside the workspace.
+  `workspace`, with option denylists for options that run a program, write a
+  file or load attacker-supplied data (`find -exec/-delete/-fprint`,
+  `rg --pre/--hostname-bin/-z`, `file -m/-C/-f`, symlink-following flags).
+- **git is never auto-allowed for broker execution.** Even read-only git
+  subcommands run programs named in the repository's own configuration
+  (`core.fsmonitor`, clean/smudge filter drivers, textconv, `diff.external`,
+  the pager, hooks). A sandboxed agent that can write its workspace's
+  `.git/config` or `.gitattributes` would get code execution *outside* the
+  sandbox if the broker ran `git status` for it. The default git allow
+  rules are therefore `advisory_only`: they answer decision-only requests
+  (a harness hook asking whether it may run git in its own context, which
+  grants nothing new), while broker-executed git (`gate run`, `gated_exec`)
+  falls through to `ask`. Gatehouse does not try to neutralise git config
+  with `-c` overrides: filter drivers have arbitrary names, so any such
+  defence would be partial. A human approving a broker-run git command in
+  an agent-writable repo is approving whatever that repo's config runs.
+- **Not covered:** the option denylists come from per-tool knowledge and can
+  miss options in other versions of those tools. `file` still loads
+  `~/.magic(.mgc)` from the passed-through `HOME` (data, not code).
+  Metadata tools reveal which files exist outside the workspace.
 
 **Path containment** (workspace writes, `path_prefix`, `args_in_workspace`)
 normalises `.`/`..` lexically, compares component-wise, requires absolute

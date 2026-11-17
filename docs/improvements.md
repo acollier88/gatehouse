@@ -131,7 +131,11 @@ passkey is enrolled; the no-passkey fallback is audited as
 now need a trusted argv0 (`[exec] path`), the broker executes the trusted
 resolution, and three per-argument matchers (`args_any_glob`,
 `args_deny_glob`, `args_in_workspace`) let the defaults say what they mean.
-Residual: repository-config-driven git execution (see threat model).
+Follow-up: git runs programs from the repository's own config even for
+read-only subcommands, so the default git allow rules are now
+`advisory_only` (decision-only requests; broker-executed git asks). A
+re-audit of the other allow rules added `file -m/-C`, `rg -z` and BSD
+`grep -S` to their deny lists.
 
 ### S10 — Workspace / path_prefix checks were raw string prefixes — FIXED (same branch)
 
@@ -242,9 +246,6 @@ commands.
       CSPRNG; `gate-mcp` uses the same endpoint resolver.
 - [ ] Native/pinned approval client to close S1's residual risk (roadmap
       Phase 9).
-- [ ] S9 residual: default git allow rules trust repository config
-      (`core.fsmonitor`, filters, textconv). Decide whether to neutralise
-      those for broker-run git or drop the rules.
 - [ ] S11 residual: Windows timeout kills only the direct child (needs a
       job object).
 - [ ] The ctl socket itself is unauthenticated beyond OS permissions /

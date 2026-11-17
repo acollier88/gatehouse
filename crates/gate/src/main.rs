@@ -94,7 +94,9 @@ enum AuditCmd {
 
 #[derive(Subcommand)]
 enum PolicyCmd {
-    /// Resolve the policy tier for a command without executing it.
+    /// Resolve the policy tier for a command without executing it. Prints
+    /// the tier for broker execution (`run:`, i.e. `gate run`) and for a
+    /// decision-only request (`advisory:`, i.e. `gate ask` / hooks).
     Test {
         #[arg(trailing_var_arg = true, required = true)]
         argv: Vec<String>,
@@ -173,8 +175,14 @@ fn policy_test(argv: Vec<String>) -> anyhow::Result<ExitCode> {
         env_allowlist: vec![],
         op: Operation::Exec { argv, cwd },
     };
-    let (tier, rule) = policy.resolve(&request);
-    println!("tier={tier} rule={rule}");
+    // Show both outcomes: `gate run` / gated_exec (the broker executes) and
+    // `gate ask` / harness hooks (decision only). They differ for rules
+    // marked `advisory_only`.
+    use gatehouse_proto::policy::Mode;
+    let (tier, rule) = policy.resolve(&request, Mode::BrokerExecutes);
+    println!("run:      tier={tier} rule={rule}");
+    let (tier, rule) = policy.resolve(&request, Mode::DecisionOnly);
+    println!("advisory: tier={tier} rule={rule}");
     println!("summary={}", request.summary());
     println!("digest={}", &request.digest()?[..16]);
     Ok(ExitCode::SUCCESS)

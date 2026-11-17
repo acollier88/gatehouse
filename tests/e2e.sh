@@ -94,10 +94,19 @@ echo "$pt" | grep -q 'tier=allow' && fail "./ls must not resolve to allow, got: 
 pt="$("$bin/gate" policy test -- find . -exec sh -c id ';')"
 echo "$pt" | grep -q 'tier=allow' && fail "find -exec must not resolve to allow, got: $pt"
 
+echo "== broker-run git is not allowed; the advisory decision is"
+pt="$("$bin/gate" policy test -- git status)"
+echo "$pt" | grep -q '^run: *tier=ask ' || fail "broker-run git status should ask, got: $pt"
+echo "$pt" | grep -q '^advisory: *tier=allow ' || fail "advisory git status should allow, got: $pt"
+
 echo "== claude-code hook: allow tier"
 hookin() { printf '{"session_id":"e2e","cwd":"%s","tool_name":"%s","tool_input":%s}' "$tmp" "$1" "$2"; }
 out="$(hookin Bash '{"command":"ls -la"}' | "$bin/gate" hook claude-code)"
 echo "$out" | grep -q '"permissionDecision":"allow"' || fail "hook should allow ls, got: $out"
+
+echo "== claude-code hook: git status is an advisory allow"
+out="$(hookin Bash '{"command":"git status"}' | "$bin/gate" hook claude-code)"
+echo "$out" | grep -q '"permissionDecision":"allow"' || fail "hook should allow git status, got: $out"
 
 echo "== claude-code hook: deny tier"
 out="$(hookin Bash '{"command":"sudo rm -rf /"}' | "$bin/gate" hook claude-code)"

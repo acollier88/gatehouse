@@ -96,6 +96,25 @@ fn default_exec_path() -> Vec<String> {
     }
 }
 
+/// Whether a request will be executed by the broker or only decided.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Mode {
+    /// `execute: true` — the broker runs the command as the daemon user.
+    BrokerExecutes,
+    /// `execute: false` — advisory decision; the harness runs it, if at all.
+    DecisionOnly,
+}
+
+impl Mode {
+    pub fn from_execute(execute: bool) -> Self {
+        if execute {
+            Mode::BrokerExecutes
+        } else {
+            Mode::DecisionOnly
+        }
+    }
+}
+
 /// First matching rule wins; rules are evaluated in file order. A rule only
 /// matches the operation kind its matchers apply to (argv matchers → exec,
 /// path_prefix → file_write, host_glob → net).
@@ -140,6 +159,15 @@ pub struct Rule {
     /// qualify. With no workspace configured, such a rule never matches.
     #[serde(default)]
     pub args_in_workspace: bool,
+    /// The rule applies only to decision-only requests (advisory mode:
+    /// harness hooks, `gate ask`), never to requests the broker will execute
+    /// (`gate run`, `gated_exec`). Use it for commands that are fine for a
+    /// harness to run in its own context but would hand a sandboxed agent
+    /// code execution outside the sandbox if the broker ran them, such as
+    /// git in a repository whose config the agent can write. A broker-run
+    /// request skips the rule and falls through to the next one.
+    #[serde(default)]
+    pub advisory_only: bool,
     #[serde(default)]
     pub path_prefix: Option<String>,
     #[serde(default)]
@@ -159,8 +187,14 @@ impl Policy {
     }
 
     /// Resolve a request to a tier plus the name of what decided it.
-    pub fn resolve(&self, req: &GateRequest) -> (Tier, String) {
+    ///
+    /// `mode` says whether the broker will execute the request: rules marked
+    /// `advisory_only` are skipped for [`Mode::BrokerExecutes`].
+    pub fn resolve(&self, req: &GateRequest, mode: Mode) -> (Tier, String) {
         for rule in &self.rules {
+            if rule.advisory_only && mode == Mode::BrokerExecutes {
+                continue;
+            }
             if rule.matches(self, &req.op) {
                 return (rule.tier, rule.name.clone());
             }
@@ -452,6 +486,7 @@ pub const DEFAULT_POLICY: &str = include_str!("../default_policy.toml");
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::contain::tests::abs;
 
     fn exec_req(argv: &[&str]) -> GateRequest {
         GateRequest {
@@ -469,6 +504,18 @@ mod tests {
         toml::from_str(DEFAULT_POLICY).expect("default policy parses")
     }
 
+    impl Policy {
+        /// Broker-executed resolution: the conservative mode, used by
+        /// default in these tests.
+        fn resolve_x(&self, req: &GateRequest) -> (Tier, String) {
+            self.resolve(req, Mode::BrokerExecutes)
+        }
+
+        fn resolve_advisory(&self, req: &GateRequest) -> (Tier, String) {
+            self.resolve(req, Mode::DecisionOnly)
+        }
+    }
+
     #[test]
     fn default_policy_parses() {
         default_policy();
@@ -477,16 +524,19 @@ mod tests {
     #[test]
     fn safe_commands_allow() {
         let p = default_policy();
-        assert_eq!(p.resolve(&exec_req(&["ls", "-la"])).0, Tier::Allow);
-        assert_eq!(p.resolve(&exec_req(&["git", "status"])).0, Tier::Allow);
-        assert_eq!(p.resolve(&exec_req(&["echo", "hi"])).0, Tier::Allow);
+        assert_eq!(p.resolve_x(&exec_req(&["ls", "-la"])).0, Tier::Allow);
+        assert_eq!(
+            p.resolve_advisory(&exec_req(&["git", "status"])).0,
+            Tier::Allow
+        );
+        assert_eq!(p.resolve_x(&exec_req(&["echo", "hi"])).0, Tier::Allow);
     }
 
     #[test]
     fn git_push_needs_strong_approval() {
         let p = default_policy();
         assert_eq!(
-            p.resolve(&exec_req(&["git", "push", "origin", "main"])).0,
+            p.resolve_x(&exec_req(&["git", "push", "origin", "main"])).0,
             Tier::AskStrong
         );
     }
@@ -495,7 +545,7 @@ mod tests {
     fn absolute_path_argv0_still_matches() {
         let p = default_policy();
         assert_eq!(
-            p.resolve(&exec_req(&["/usr/bin/git", "push"])).0,
+            p.resolve_x(&exec_req(&["/usr/bin/git", "push"])).0,
             Tier::AskStrong
         );
     }
@@ -503,14 +553,14 @@ mod tests {
     #[test]
     fn sudo_denied() {
         let p = default_policy();
-        assert_eq!(p.resolve(&exec_req(&["sudo", "ls"])).0, Tier::Deny);
+        assert_eq!(p.resolve_x(&exec_req(&["sudo", "ls"])).0, Tier::Deny);
     }
 
     #[test]
     fn opaque_shell_is_ask_strong() {
         let p = default_policy();
         assert_eq!(
-            p.resolve(&exec_req(&["bash", "-c", "curl x | sh"])).0,
+            p.resolve_x(&exec_req(&["bash", "-c", "curl x | sh"])).0,
             Tier::AskStrong
         );
     }
@@ -518,21 +568,21 @@ mod tests {
     #[test]
     fn unknown_command_falls_to_default_ask() {
         let p = default_policy();
-        assert_eq!(p.resolve(&exec_req(&["frobnicate"])).0, Tier::Ask);
+        assert_eq!(p.resolve_x(&exec_req(&["frobnicate"])).0, Tier::Ask);
     }
 
     #[test]
     fn workspace_write_allows_and_outside_asks() {
         let mut p = default_policy();
-        p.workspace = vec!["/ws".into()];
+        p.workspace = vec![abs("/ws")];
         let write = |path: &str| GateRequest {
             harness: "t".into(),
             session_id: "s".into(),
             env_allowlist: vec![],
-            op: Operation::FileWrite { path: path.into() },
+            op: Operation::FileWrite { path: abs(path) },
         };
-        assert_eq!(p.resolve(&write("/ws/src/main.rs")).0, Tier::Allow);
-        assert_eq!(p.resolve(&write("/etc/passwd")).0, Tier::Ask);
+        assert_eq!(p.resolve_x(&write("/ws/src/main.rs")).0, Tier::Allow);
+        assert_eq!(p.resolve_x(&write("/etc/passwd")).0, Tier::Ask);
     }
 
     fn write_req(path: &str) -> GateRequest {
@@ -548,7 +598,7 @@ mod tests {
     #[test]
     fn workspace_rejects_traversal_sibling_and_relative() {
         let mut p = default_policy();
-        p.workspace = vec!["/ws".into()];
+        p.workspace = vec![abs("/ws")];
         for path in [
             "/ws/../etc/passwd",
             "/ws-evil/x",
@@ -556,27 +606,41 @@ mod tests {
             "../ws/x",
             "",
         ] {
-            assert_eq!(p.resolve(&write_req(path)).0, Tier::Ask, "{path}");
+            let path = if path.starts_with('/') {
+                abs(path)
+            } else {
+                path.to_string()
+            };
+            assert_eq!(p.resolve_x(&write_req(&path)).0, Tier::Ask, "{path}");
         }
     }
 
     #[test]
     fn path_prefix_rules_are_component_wise_and_tier_aware() {
-        let p: Policy = toml::from_str(
+        let p: Policy = toml::from_str(&format!(
             r#"
             [[rules]]
             name = "ssh keys denied"
             tier = "deny"
-            path_prefix = "/home/u/.ssh"
+            path_prefix = '{}'
 
             [[rules]]
             name = "build dir allowed"
             tier = "allow"
-            path_prefix = "/ws/target"
+            path_prefix = '{}'
             "#,
-        )
+            abs("/home/u/.ssh"),
+            abs("/ws/target"),
+        ))
         .unwrap();
-        let t = |path: &str| p.resolve(&write_req(path)).0;
+        let t = |path: &str| {
+            let path = if path.starts_with('/') {
+                abs(path)
+            } else {
+                path.to_string()
+            };
+            p.resolve_x(&write_req(&path)).0
+        };
         assert_eq!(t("/home/u/.ssh/authorized_keys"), Tier::Deny);
         assert_eq!(t("/home/u/x/../.ssh/authorized_keys"), Tier::Deny);
         assert_eq!(t("/home/u/.sshx"), Tier::Ask);
@@ -639,7 +703,7 @@ mod tests {
         let cwd = evil.to_str().unwrap();
         for prog in ["./ls", planted, "bin/ls", "../ls"] {
             assert_ne!(
-                p.resolve(&exec_in(cwd, &[prog, "-la"])).0,
+                p.resolve_x(&exec_in(cwd, &[prog, "-la"])).0,
                 Tier::Allow,
                 "{prog}"
             );
@@ -647,7 +711,7 @@ mod tests {
         // The real one, spelled absolutely, still matches.
         if let Some(real) = p.resolve_program("ls", "/") {
             let real = real.to_str().unwrap();
-            assert_eq!(p.resolve(&exec_req(&[real, "-la"])).0, Tier::Allow);
+            assert_eq!(p.resolve_x(&exec_req(&[real, "-la"])).0, Tier::Allow);
         }
     }
 
@@ -655,8 +719,11 @@ mod tests {
     #[test]
     fn restrictive_rules_still_match_by_basename() {
         let p = default_policy();
-        assert_eq!(p.resolve(&exec_req(&["/tmp/x/sudo", "ls"])).0, Tier::Deny);
-        assert_eq!(p.resolve(&exec_req(&["./git", "push"])).0, Tier::AskStrong);
+        assert_eq!(p.resolve_x(&exec_req(&["/tmp/x/sudo", "ls"])).0, Tier::Deny);
+        assert_eq!(
+            p.resolve_x(&exec_req(&["./git", "push"])).0,
+            Tier::AskStrong
+        );
     }
 
     #[cfg(unix)]
@@ -685,7 +752,7 @@ mod tests {
     #[test]
     fn find_exec_and_friends_are_not_allowed() {
         let (p, ws) = ws_policy();
-        let t = |argv: &[&str]| p.resolve(&exec_in(&ws, argv)).0;
+        let t = |argv: &[&str]| p.resolve_x(&exec_in(&ws, argv)).0;
         assert_eq!(t(&["find", ".", "-name", "*.rs"]), Tier::Allow);
         for bad in [
             &["find", ".", "-exec", "sh", "-c", "id", ";"][..],
@@ -703,7 +770,9 @@ mod tests {
     #[test]
     fn git_fetch_and_option_abuse_are_not_allowed() {
         let (p, ws) = ws_policy();
-        let t = |argv: &[&str]| p.resolve(&exec_in(&ws, argv)).0;
+        // The git allow rules only exist for decision-only requests, so
+        // that is where their option carve-outs have to hold.
+        let t = |argv: &[&str]| p.resolve_advisory(&exec_in(&ws, argv)).0;
         assert_eq!(t(&["git", "status"]), Tier::Allow);
         assert_eq!(t(&["git", "log", "--oneline", "-5"]), Tier::Allow);
         assert_eq!(t(&["git", "diff", "HEAD~1", "--", "src"]), Tier::Allow);
@@ -736,13 +805,65 @@ mod tests {
             assert_ne!(t(bad), Tier::Allow, "{bad:?}");
         }
         // Reading history is confined to the workspace.
-        assert_eq!(p.resolve(&exec_in("/", &["git", "log"])).0, Tier::Ask);
+        assert_eq!(
+            p.resolve_advisory(&exec_in("/", &["git", "log"])).0,
+            Tier::Ask
+        );
+    }
+
+    /// Regression: git runs programs named in the repository's own config
+    /// (core.fsmonitor, filter drivers, textconv, diff.external, hooks). If
+    /// the *broker* ran `git status` in an agent-writable repo, that was code
+    /// execution outside the sandbox. Broker-run git is no longer allowed by
+    /// default; the advisory decision (harness runs git itself) still is.
+    #[test]
+    fn broker_executed_git_is_not_allowed_but_advisory_is() {
+        let (p, ws) = ws_policy();
+        for argv in [
+            &["git", "status"][..],
+            &["git", "status", "--porcelain"],
+            &["git", "branch"],
+            &["git", "remote", "-v"],
+            &["git", "diff"],
+            &["git", "log", "--oneline"],
+            &["git", "show", "HEAD"],
+        ] {
+            let req = exec_in(&ws, argv);
+            assert_eq!(p.resolve_x(&req).0, Tier::Ask, "broker {argv:?}");
+            assert_eq!(p.resolve_advisory(&req).0, Tier::Allow, "advisory {argv:?}");
+        }
+        // Restrictive git rules apply in both modes.
+        let push = exec_req(&["git", "push"]);
+        assert_eq!(p.resolve_x(&push).0, Tier::AskStrong);
+        assert_eq!(p.resolve_advisory(&push).0, Tier::AskStrong);
+    }
+
+    #[test]
+    fn advisory_only_rules_are_skipped_when_the_broker_executes() {
+        let p: Policy = toml::from_str(
+            r#"
+            [[rules]]
+            name = "advisory"
+            tier = "allow"
+            argv0 = ["echo"]
+            advisory_only = true
+
+            [[rules]]
+            name = "fallback"
+            tier = "deny"
+            argv0 = ["echo"]
+            "#,
+        )
+        .unwrap();
+        let req = exec_req(&["echo", "hi"]);
+        assert_eq!(p.resolve_advisory(&req), (Tier::Allow, "advisory".into()));
+        assert_eq!(p.resolve_x(&req), (Tier::Deny, "fallback".into()));
     }
 
     #[test]
     fn rg_and_grep_dangerous_options_are_not_allowed() {
         let (p, ws) = ws_policy();
-        let t = |argv: &[&str]| p.resolve(&exec_in(&ws, argv)).0;
+        let t = |argv: &[&str]| p.resolve_x(&exec_in(&ws, argv)).0;
         assert_eq!(t(&["rg", "-n", "main", "src"]), Tier::Allow);
         assert_eq!(t(&["grep", "-rn", "main", "."]), Tier::Allow);
         for bad in [
@@ -759,11 +880,40 @@ mod tests {
         }
     }
 
+    /// Re-audit of the remaining allow rules: options that run a program,
+    /// write a file, or load attacker-supplied config are carved out.
+    #[test]
+    fn audited_options_are_not_allowed() {
+        let (p, ws) = ws_policy();
+        let t = |argv: &[&str]| p.resolve_x(&exec_in(&ws, argv)).0;
+        assert_eq!(t(&["file", "src/main.rs"]), Tier::Allow);
+        assert_eq!(t(&["file", "--mime-type", "src/main.rs"]), Tier::Allow);
+        assert_eq!(t(&["rg", "-i", "main"]), Tier::Allow);
+        for bad in [
+            &["file", "-C", "-m", "magic"][..],
+            &["file", "--compile", "-m", "magic"],
+            &["file", "--comp", "--magic-file=magic"],
+            &["file", "-m", "magic", "src/main.rs"],
+            &["file", "-mmagic", "src/main.rs"],
+            &["file", "-bm", "magic", "src/main.rs"],
+            &["file", "--magic-file", "magic", "src/main.rs"],
+            &["file", "--mag=magic", "src/main.rs"],
+            &["file", "-f", "names"],
+            &["rg", "-z", "x"],
+            &["rg", "-iz", "x"],
+            &["rg", "--search-zip", "x"],
+            &["grep", "-rS", "x", "."],
+            &["grep", "-S", "-r", "x", "."],
+        ] {
+            assert_ne!(t(bad), Tier::Allow, "{bad:?}");
+        }
+    }
+
     /// Regression: `cat` of any path was auto-allowed.
     #[test]
     fn cat_is_confined_to_the_workspace() {
         let (p, ws) = ws_policy();
-        let t = |cwd: &str, argv: &[&str]| p.resolve(&exec_in(cwd, argv)).0;
+        let t = |cwd: &str, argv: &[&str]| p.resolve_x(&exec_in(cwd, argv)).0;
         assert_eq!(t(&ws, &["cat", "src/main.rs"]), Tier::Allow);
         assert_eq!(t(&ws, &["head", "-n", "5", "src/main.rs"]), Tier::Allow);
         for bad in [
@@ -781,7 +931,7 @@ mod tests {
         // No workspace configured: never auto-allowed.
         let bare = default_policy();
         assert_ne!(
-            bare.resolve(&exec_in(&ws, &["cat", "src/main.rs"])).0,
+            bare.resolve_x(&exec_in(&ws, &["cat", "src/main.rs"])).0,
             Tier::Allow
         );
     }
@@ -793,13 +943,13 @@ mod tests {
         let out = tempdir("out");
         std::fs::write(out.join("secret"), b"x").unwrap();
         std::os::unix::fs::symlink(out.join("secret"), Path::new(&ws).join("link")).unwrap();
-        assert_ne!(p.resolve(&exec_in(&ws, &["cat", "link"])).0, Tier::Allow);
+        assert_ne!(p.resolve_x(&exec_in(&ws, &["cat", "link"])).0, Tier::Allow);
     }
 
     #[test]
     fn push_and_rm_are_caught_wherever_the_flag_sits() {
         let p = default_policy();
-        let t = |argv: &[&str]| p.resolve(&exec_req(argv)).0;
+        let t = |argv: &[&str]| p.resolve_x(&exec_req(argv)).0;
         assert_eq!(t(&["git", "-C", "/repo", "push"]), Tier::AskStrong);
         assert_eq!(t(&["git", "-c", "a=b", "push", "--force"]), Tier::AskStrong);
         for rm in [
@@ -826,7 +976,7 @@ mod tests {
             &["sh", "-xc", "id"],
             &["/bin/zsh", "-c", "id"],
         ] {
-            assert_eq!(p.resolve(&exec_req(argv)).0, Tier::AskStrong, "{argv:?}");
+            assert_eq!(p.resolve_x(&exec_req(argv)).0, Tier::AskStrong, "{argv:?}");
         }
     }
 
@@ -843,8 +993,11 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(p.resolve(&exec_req(&["npm", "run", "test"])).0, Tier::Allow);
-        assert_eq!(p.resolve(&exec_req(&["npm", "install"])).0, Tier::Ask);
+        assert_eq!(
+            p.resolve_x(&exec_req(&["npm", "run", "test"])).0,
+            Tier::Allow
+        );
+        assert_eq!(p.resolve_x(&exec_req(&["npm", "install"])).0, Tier::Ask);
         assert!(!p.exec_path().is_empty());
     }
 
@@ -894,6 +1047,6 @@ mod tests {
             "#,
         )
         .unwrap();
-        assert_eq!(p.resolve(&exec_req(&["anything"])).0, Tier::Ask);
+        assert_eq!(p.resolve_x(&exec_req(&["anything"])).0, Tier::Ask);
     }
 }

@@ -83,7 +83,10 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, mut request: GateRequest, exe
         }
     };
     let summary = request.summary();
-    let (mut tier, mut rule) = ctx.policy.resolve(&request);
+    let (mut tier, mut rule) = ctx.policy.resolve(
+        &request,
+        gatehouse_proto::policy::Mode::from_execute(execute),
+    );
 
     if grant_lifts(&ctx.state, tier, &request.op) {
         tier = Tier::Allow;
@@ -609,6 +612,28 @@ mod tests {
         assert_eq!(statuses(&msgs), vec![(Tier::Deny, DecisionStatus::Denied)]);
     }
 
+    /// Regression: broker-executed git in an agent-writable repo is code
+    /// execution via repo config, so `gate run -- git status` must not be
+    /// auto-allowed; the advisory decision (hook mode) still is.
+    #[tokio::test]
+    async fn broker_run_git_asks_but_advisory_git_allows() {
+        let (ctx, _) = crate::test_ctx(default_policy(), Duration::from_millis(100), vec![]);
+        let msgs = submit(&ctx, exec(&["git", "status"]), true).await;
+        assert_eq!(
+            statuses(&msgs),
+            vec![
+                (Tier::Ask, DecisionStatus::Pending),
+                (Tier::Ask, DecisionStatus::Denied)
+            ]
+        );
+        assert!(exit_of(&msgs).is_none(), "nothing may have been executed");
+        let msgs = submit(&ctx, exec(&["git", "status"]), false).await;
+        assert_eq!(
+            statuses(&msgs),
+            vec![(Tier::Allow, DecisionStatus::Allowed)]
+        );
+    }
+
     #[tokio::test]
     async fn grants_still_lift_plain_ask() {
         let (ctx, _) = crate::test_ctx(default_policy(), Duration::from_millis(100), vec![]);
@@ -675,6 +700,7 @@ mod tests {
         assert_eq!(rule, "operator-ctl (unattested)");
     }
 
+    #[cfg(unix)]
     fn stdout_of(msgs: &[DaemonMsg]) -> String {
         let b64 = base64::engine::general_purpose::STANDARD;
         msgs.iter()
@@ -701,6 +727,7 @@ mod tests {
         std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
 
+    #[cfg(unix)]
     fn scratch(tag: &str) -> std::path::PathBuf {
         let d = std::env::temp_dir().join(format!("gh-srv-{tag}-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir_all(&d).unwrap();
@@ -749,6 +776,7 @@ mod tests {
         assert!(stdout_of(&msgs).is_empty());
     }
 
+    #[cfg(unix)]
     fn stderr_of(msgs: &[DaemonMsg]) -> String {
         let b64 = base64::engine::general_purpose::STANDARD;
         msgs.iter()
