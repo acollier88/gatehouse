@@ -117,11 +117,67 @@ CSPRNG, single-use, 5-minute TTL, compared in constant time
 bearer token still cannot enroll their own authenticator without simultaneous
 access to the operator’s terminal.
 
+## Policy and broker execution
+
+The ctl socket is **not authenticated** beyond filesystem permissions /
+the IPC token: anything that can reach it can list, deny, approve `ask`
+requests and create session grants. What that does and does not buy:
+
+- **Session grants lift `ask` only.** A grant never lifts `ask_strong` or
+  `deny`, and its glob must start with a literal program name (`*`, `* *`,
+  `n*` are refused). `gate grant "*"` therefore cannot stand in for the
+  passkey.
+- **Ask-strong via ctl** is refused while any passkey is enrolled (checked
+  in `ctl.rs` and again before release in `server.rs`). With *no* passkey
+  enrolled it is the documented fallback; the audit entry is recorded with
+  decision `approved-unattested` so it is distinguishable from an attested
+  release.
+
+The **allow tier is executed by the broker** with no human in the loop, so
+an allow rule must not be a code-execution or file-exfiltration primitive:
+
+- An `allow` rule's `argv0` matches only a bare name or an absolute path to
+  the same file in a trusted `[exec] path` directory (a fixed system list by
+  default, never the daemon's inherited `PATH`). `./ls` or `/tmp/x/ls` fall
+  through to a stricter tier. Restrictive rules still match by basename.
+  The broker executes the trusted resolution of a bare name and gives the
+  child that trusted path as `PATH`.
+- Default allow rules are limited to metadata tools anywhere, and
+  content-reading tools (`cat`, `grep`, `rg`, `find`, `git diff/log/show`, …)
+  only when the cwd and every path-like argument are inside a configured
+  `workspace`, with option denylists (`find -exec/-delete`, `rg --pre`,
+  `git --output/--no-index`, …). `git fetch` is no longer allowed.
+- **Not covered:** git executes programs named in a repository's own config
+  (`core.fsmonitor`, filter drivers, textconv). An agent that can write a
+  repo's `.git/config` or `.gitattributes` gets code execution through the
+  default git allow rules; remove them if the agent can write `.git`. The
+  option denylists are per-tool knowledge and can miss options in other
+  versions of those tools. Metadata tools reveal which files exist
+  outside the workspace.
+
+**Path containment** (workspace writes, `path_prefix`, `args_in_workspace`)
+normalises `.`/`..` lexically, compares component-wise, requires absolute
+paths for anything permissive, and resolves symlinks through the deepest
+existing ancestor. Not covered: components created (e.g. as symlinks)
+between the check and the write, hard links, case-insensitive filesystems
+(permissive checks fail safe; restrictive `path_prefix` rules may miss a
+differently-cased spelling), and symlinks followed by a tool while
+recursing (the deny lists block the common follow flags only).
+
+**Broker-executed children** are bounded by `[exec] timeout_secs` (process
+group killed on Unix; only the direct child on Windows) and
+`[exec] max_output_bytes`. Environment passthrough is restricted to names in
+`[exec] env_passthrough`; the request is narrowed before it is digested, so
+the summary names exactly the variables passed. Children still run as the
+daemon's user with its `HOME`.
+
 ## What hook / MCP “advisory” mode does NOT protect against
 
 - Harness with hooks disabled, bypassed, or not installed
 - Direct execution outside `gate run` / `gated_exec` when the sandbox is off
 - TOCTOU between allow and harness-side execution (hook mode)
+- The harness resolving an allowed bare name (`ls`) through its own `PATH`
+  (hook mode; the trusted `[exec] path` only governs broker execution)
 - A compromised `gatehoused` process or the operator’s OS user account
 - Social engineering that tricks the human into approving a summary they did
   not read. The signature covers the request *identity* (digest + nonce), so
