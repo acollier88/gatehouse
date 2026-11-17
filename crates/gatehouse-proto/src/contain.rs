@@ -104,37 +104,51 @@ pub fn within_loose(path: &str, root: &str) -> bool {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A Unix-style absolute test path made absolute on this platform
+    /// (`/ws` is drive-relative on Windows, so it gets a `C:` prefix).
+    pub(crate) fn abs(p: &str) -> String {
+        if cfg!(windows) {
+            format!("C:{p}")
+        } else {
+            p.to_string()
+        }
+    }
 
     #[test]
     fn lexical_normalisation() {
-        let n = |s: &str| normalize_lexical(Path::new(s)).map(|p| p.to_string_lossy().into_owned());
-        assert_eq!(n("/ws/./a/../b").as_deref(), Some("/ws/b"));
-        assert_eq!(n("/ws/../etc/passwd").as_deref(), Some("/etc/passwd"));
-        assert_eq!(n("/../../etc").as_deref(), Some("/etc"));
-        assert_eq!(n("relative/x"), None);
-        assert_eq!(n(""), None);
+        let n = |s: &str| normalize_lexical(Path::new(&abs(s)));
+        let p = |s: &str| Some(PathBuf::from(abs(s)));
+        assert_eq!(n("/ws/./a/../b"), p("/ws/b"));
+        assert_eq!(n("/ws/../etc/passwd"), p("/etc/passwd"));
+        assert_eq!(n("/../../etc"), p("/etc"));
+        assert_eq!(normalize_lexical(Path::new("relative/x")), None);
+        assert_eq!(normalize_lexical(Path::new("")), None);
     }
 
     #[test]
     fn dotdot_traversal_is_outside() {
-        assert!(!within_strict("/ws/../etc/passwd", "/ws"));
-        assert!(!within_strict("/ws/a/../../etc/passwd", "/ws"));
+        let ws = abs("/ws");
+        assert!(!within_strict(&abs("/ws/../etc/passwd"), &ws));
+        assert!(!within_strict(&abs("/ws/a/../../etc/passwd"), &ws));
     }
 
     #[test]
     fn sibling_prefix_is_outside() {
-        assert!(!within_strict("/ws-evil/x", "/ws"));
-        assert!(!within_strict("/wsx", "/ws"));
-        assert!(!within_loose("/ws-evil/x", "/ws"));
+        let ws = abs("/ws");
+        assert!(!within_strict(&abs("/ws-evil/x"), &ws));
+        assert!(!within_strict(&abs("/wsx"), &ws));
+        assert!(!within_loose(&abs("/ws-evil/x"), &ws));
     }
 
     #[test]
     fn relative_paths_fail_safe() {
-        assert!(!within_strict("src/main.rs", "/ws"));
-        assert!(!within_strict("../ws/x", "/ws"));
-        assert!(within_loose("src/main.rs", "/ws"));
+        let ws = abs("/ws");
+        assert!(!within_strict("src/main.rs", &ws));
+        assert!(!within_strict("../ws/x", &ws));
+        assert!(within_loose("src/main.rs", &ws));
     }
 
     #[test]
