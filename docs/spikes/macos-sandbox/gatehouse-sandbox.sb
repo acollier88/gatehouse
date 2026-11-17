@@ -1,0 +1,144 @@
+;;; gatehouse-sandbox.sb -- draft Seatbelt profile for `gate sandbox` (spike, issue #7)
+;;;
+;;; Parameters (sandbox-exec -D KEY=VALUE). All paths must be canonical
+;;; (realpath'd: /private/tmp not /tmp, /private/var not /var).
+;;;   HOME        real home dir of the user (reads under it are denied by default)
+;;;   WORKSPACE   the only persistent writable tree
+;;;   SBX_TMP     private scratch/TMPDIR for the sandboxed agent (writable)
+;;;   AGENT_SOCK  the gatehouse agent socket (the ONLY unix socket connect allowed)
+;;;   USER_TMP    `getconf DARWIN_USER_TEMP_DIR` (canonical) - mktemp(1)/confstr users ignore TMPDIR; "/nonexistent" to deny
+;;;   USER_CACHE  `getconf DARWIN_USER_CACHE_DIR` (canonical); "/nonexistent" to deny
+;;;   NET         "none" | "localhost" | "outbound"
+;;;   HTTP_PORT   gatehoused approval-page port from http.json; denied in localhost/outbound modes
+;;;   GIT_DIR     main repo .git of a worktree workspace (RW for objects/refs, but hooks/config denied); "/nonexistent" if unused
+;;;   TOOL_RO_1..TOOL_RO_4  read-only extra trees (harness install dirs etc.); use "/nonexistent" if unused
+;;;   TOOL_RW_1..TOOL_RW_4  read-write extra trees (harness config/state dirs); use "/nonexistent" if unused
+;;;
+;;; Rule order matters: in SBPL the LAST matching rule wins. Hence the
+;;; layout: broad allow -> broad deny -> narrow re-allow -> credential deny last.
+
+(version 1)
+(deny default)
+(import "system.sb")
+
+;;; ---------- process ----------
+(allow process-fork)
+(allow process-exec)
+(allow process-info* (target same-sandbox))
+(allow process-info-pidinfo)
+(allow signal (target same-sandbox))
+(allow sysctl-read)
+(allow pseudo-tty)
+(allow file-ioctl)
+(allow ipc-posix-shm-read* ipc-posix-shm-write-data ipc-posix-sem)
+
+;;; ---------- mach / XPC ----------
+;;; system.sb already allows its baseline global-names. Deliberately NOT allowed:
+;;; com.apple.securityd*/SecurityServer (keychain), com.apple.tccd*, CalendarAgent/
+;;; EventKit, launchservicesd (`open` would escape), pasteboard, coreservices.
+(allow mach-lookup
+       (global-name "com.apple.FSEvents")
+       (global-name "com.apple.SystemConfiguration.configd")
+       (global-name "com.apple.system.opendirectoryd.api"))
+
+;;; ---------- file reads ----------
+;;; 1. broad allow: system, toolchains, /usr/local, /opt/homebrew ...
+(allow file-read* (subpath "/"))
+;;; 2. broad deny: all user data, removable volumes, shared tmp, per-user var/folders
+(deny file-read*
+      (subpath "/Users")
+      (subpath "/Volumes")
+      (subpath "/private/tmp")
+      (subpath "/private/var/folders")
+      (subpath "/Library/Keychains")
+      (subpath "/private/var/db/SystemKey"))
+;;; path traversal: allow stat() of ancestors so realpath/getcwd work
+(allow file-read-metadata
+       (literal "/Users")
+       (literal "/private/tmp")
+       (path-ancestors (param "WORKSPACE"))
+       (path-ancestors (param "SBX_TMP"))
+       (path-ancestors (param "USER_TMP"))
+       (literal (param "HOME"))
+       ;; realpath(3) lstat()s every component (cursor-agent's launcher failed without this)
+       (path-ancestors (param "TOOL_RO_1")) (path-ancestors (param "TOOL_RO_2"))
+       (path-ancestors (param "TOOL_RO_3")) (path-ancestors (param "TOOL_RO_4"))
+       (path-ancestors (param "TOOL_RW_1")) (path-ancestors (param "TOOL_RW_2"))
+       (path-ancestors (param "TOOL_RW_3")) (path-ancestors (param "TOOL_RW_4"))
+       (path-ancestors (param "GIT_DIR")))
+;;; 3. narrow re-allow
+(allow file-read*
+       (subpath (param "WORKSPACE"))
+       (subpath (param "SBX_TMP"))
+       (subpath (param "USER_TMP")) (subpath (param "USER_CACHE"))
+       (subpath (param "TOOL_RO_1")) (subpath (param "TOOL_RO_2"))
+       (subpath (param "TOOL_RO_3")) (subpath (param "TOOL_RO_4"))
+       (subpath (param "TOOL_RW_1")) (subpath (param "TOOL_RW_2"))
+       (subpath (param "TOOL_RW_3")) (subpath (param "TOOL_RW_4"))
+       (subpath (param "GIT_DIR")))
+
+;;; ---------- file writes ----------
+(allow file-write*
+       (subpath (param "WORKSPACE"))
+       (subpath (param "SBX_TMP"))
+       (subpath (param "USER_TMP")) (subpath (param "USER_CACHE"))
+       (subpath (param "TOOL_RW_1")) (subpath (param "TOOL_RW_2"))
+       (subpath (param "TOOL_RW_3")) (subpath (param "TOOL_RW_4"))
+       (subpath (param "GIT_DIR"))
+       (literal "/dev/null") (literal "/dev/zero") (literal "/dev/tty")
+       (regex #"^/dev/ttys[0-9]+$") (subpath "/dev/fd"))
+
+;;; ---------- credential deny (last, so it overrides any re-allow above) ----------
+(deny file-read* file-write*
+      (subpath (string-append (param "HOME") "/.ssh"))
+      (subpath (string-append (param "HOME") "/.aws"))
+      (subpath (string-append (param "HOME") "/.gnupg"))
+      (subpath (string-append (param "HOME") "/.config/gh"))
+      (subpath (string-append (param "HOME") "/.config/apple-tasks"))
+      (subpath (string-append (param "HOME") "/.config/gatehouse"))
+      (subpath (string-append (param "HOME") "/.gatehouse"))
+      (subpath (string-append (param "HOME") "/Library/Keychains"))
+      (literal (string-append (param "HOME") "/.netrc"))
+      (literal (string-append (param "HOME") "/.git-credentials")))
+
+;;; git guard: code the agent plants here runs later, OUTSIDE the sandbox, when the
+;;; dispatcher/user runs git on the host (tested: hook planting succeeds without this).
+(deny file-write*
+      (subpath (string-append (param "GIT_DIR") "/hooks"))
+      (literal (string-append (param "GIT_DIR") "/config"))
+      (literal (string-append (param "GIT_DIR") "/info/attributes"))
+      (regex (string-append "^" (param "GIT_DIR") "/worktrees/[^/]+/config(\\.worktree)?$"))
+      (subpath (string-append (param "WORKSPACE") "/.git/hooks"))
+      (literal (string-append (param "WORKSPACE") "/.git/config")))
+
+;;; ---------- network ----------
+(deny network*)
+;;; the agent socket: stat + connect only. Socket dir itself is denied above
+;;; (~/.gatehouse), so re-allow just the one literal path.
+;;; NOTE: do NOT grant file-write* on the socket path: that lets the agent unlink it (tested).
+(allow file-read-metadata (literal (param "AGENT_SOCK")))
+(allow network-outbound (remote unix-socket (path-literal (param "AGENT_SOCK"))))
+(allow network-outbound (literal "/private/var/run/syslog"))
+;;; let tools create/use their own unix sockets inside the workspace / private tmp
+(allow network-bind network-inbound
+       (local unix-socket (subpath (param "WORKSPACE")))
+       (local unix-socket (subpath (param "SBX_TMP"))))
+(allow network-outbound
+       (remote unix-socket (subpath (param "WORKSPACE")))
+       (remote unix-socket (subpath (param "SBX_TMP"))))
+
+(if (equal? (param "NET") "localhost")
+    (allow network-outbound (remote ip "localhost:*")))
+
+(if (equal? (param "NET") "outbound")
+    (begin
+      (system-network)
+      ;; SecureTransport/curl chain building (example.com failed with curl 60 without it)
+      (allow mach-lookup (global-name "com.apple.TrustEvaluationAgent"))
+      (allow network-outbound (remote ip "*:*"))
+      (allow network-outbound (literal "/private/var/run/mDNSResponder"))
+      (allow system-socket)
+      (allow file-read* (literal "/private/var/run/resolv.conf"))))
+
+;;; MUST stay last (last match wins): gatehoused approval web page listens on localhost.
+(deny network-outbound (remote ip (string-append "localhost:" (param "HTTP_PORT"))))
