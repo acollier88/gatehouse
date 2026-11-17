@@ -2,7 +2,7 @@ use std::path::Path;
 
 use serde::Deserialize;
 
-use crate::{GateRequest, Operation, Tier};
+use crate::{contain, GateRequest, Operation, Tier};
 
 #[derive(Deserialize, Debug, Clone)]
 pub struct Policy {
@@ -69,10 +69,14 @@ impl Policy {
         }
     }
 
-    fn in_workspace(&self, path: &str) -> bool {
+    /// Strict containment (see [`crate::contain`]): absolute, lexically
+    /// inside a workspace root, and still inside once existing symlinks are
+    /// resolved. A relative path is never "in the workspace" — `FileWrite`
+    /// carries no cwd to resolve it against.
+    pub fn in_workspace(&self, path: &str) -> bool {
         self.workspace
             .iter()
-            .any(|w| path.starts_with(&expand_tilde(w)))
+            .any(|w| contain::within_strict(path, &expand_tilde(w)))
     }
 }
 
@@ -113,9 +117,16 @@ impl Rule {
                 if self.argv0.is_some() || self.args_glob.is_some() || self.host_glob.is_some() {
                     return false;
                 }
-                self.path_prefix
-                    .as_ref()
-                    .is_some_and(|p| path.starts_with(&expand_tilde(p)))
+                // Permissive rules need the path certainly inside the
+                // prefix; restrictive ones fire if it could be inside.
+                self.path_prefix.as_ref().is_some_and(|p| {
+                    let root = expand_tilde(p);
+                    if self.tier == Tier::Allow {
+                        contain::within_strict(path, &root)
+                    } else {
+                        contain::within_loose(path, &root)
+                    }
+                })
             }
             Operation::Net { host, .. } => {
                 if self.argv0.is_some() || self.args_glob.is_some() || self.path_prefix.is_some() {
@@ -148,16 +159,22 @@ fn is_opaque_shell(argv: &[String]) -> bool {
 }
 
 pub fn expand_tilde(path: &str) -> String {
+    let home = || {
+        std::env::var("HOME")
+            .ok()
+            .or_else(|| dirs::home_dir().map(|h| h.to_string_lossy().into_owned()))
+    };
+    if path == "~" {
+        if let Some(home) = home() {
+            return home;
+        }
+    }
     if let Some(rest) = path.strip_prefix("~/") {
-        if let Some(home) = dirs_home() {
+        if let Some(home) = home() {
             return format!("{home}/{rest}");
         }
     }
     path.to_string()
-}
-
-fn dirs_home() -> Option<String> {
-    std::env::var("HOME").ok()
 }
 
 pub const DEFAULT_POLICY: &str = include_str!("../default_policy.toml");
@@ -246,5 +263,56 @@ mod tests {
         };
         assert_eq!(p.resolve(&write("/ws/src/main.rs")).0, Tier::Allow);
         assert_eq!(p.resolve(&write("/etc/passwd")).0, Tier::Ask);
+    }
+
+    fn write_req(path: &str) -> GateRequest {
+        GateRequest {
+            harness: "t".into(),
+            session_id: "s".into(),
+            env_allowlist: vec![],
+            op: Operation::FileWrite { path: path.into() },
+        }
+    }
+
+    /// Regressions: the workspace check was a raw string prefix.
+    #[test]
+    fn workspace_rejects_traversal_sibling_and_relative() {
+        let mut p = default_policy();
+        p.workspace = vec!["/ws".into()];
+        for path in [
+            "/ws/../etc/passwd",
+            "/ws-evil/x",
+            "src/main.rs",
+            "../ws/x",
+            "",
+        ] {
+            assert_eq!(p.resolve(&write_req(path)).0, Tier::Ask, "{path}");
+        }
+    }
+
+    #[test]
+    fn path_prefix_rules_are_component_wise_and_tier_aware() {
+        let p: Policy = toml::from_str(
+            r#"
+            [[rules]]
+            name = "ssh keys denied"
+            tier = "deny"
+            path_prefix = "/home/u/.ssh"
+
+            [[rules]]
+            name = "build dir allowed"
+            tier = "allow"
+            path_prefix = "/ws/target"
+            "#,
+        )
+        .unwrap();
+        let t = |path: &str| p.resolve(&write_req(path)).0;
+        assert_eq!(t("/home/u/.ssh/authorized_keys"), Tier::Deny);
+        assert_eq!(t("/home/u/x/../.ssh/authorized_keys"), Tier::Deny);
+        assert_eq!(t("/home/u/.sshx"), Tier::Ask);
+        // Unknown location: matches the restrictive rule, not the permissive.
+        assert_eq!(t("authorized_keys"), Tier::Deny);
+        assert_eq!(t("/ws/target-evil/x"), Tier::Ask);
+        assert_eq!(t("/ws/target/../../etc/x"), Tier::Ask);
     }
 }

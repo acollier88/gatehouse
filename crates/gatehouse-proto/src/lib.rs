@@ -6,6 +6,7 @@
 //! what was approved.
 
 pub mod audit_log;
+pub mod contain;
 pub mod envelope;
 pub mod ipc;
 pub mod paths;
