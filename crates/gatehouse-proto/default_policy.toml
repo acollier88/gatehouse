@@ -1,34 +1,144 @@
 # Gatehouse default policy. Rules are evaluated top to bottom; first match
 # wins. Tiers: "allow" | "ask" | "ask_strong" | "deny".
 #
-# Add your project roots here so file writes inside them auto-allow:
+# The broker executes allowed commands itself, so an "allow" rule is a
+# promise that the command cannot do anything worse than what the rule name
+# says. Keep allow rules narrow.
+#
+# Exec matchers (all given ones must hold):
+#   argv0           program names. For "allow" rules argv[0] must be the bare
+#                   name or an absolute path to that file in a trusted
+#                   [exec] path directory (`./ls`, `/tmp/x/ls` never match).
+#                   Other tiers match the basename, so odd spellings can only
+#                   fall through to a stricter tier.
+#   args_glob       globs against the arguments joined with spaces; any
+#                   match qualifies. (One argument containing spaces can look
+#                   like several -- prefer the per-argument matchers.)
+#   args_any_glob   per-argument globs: some single argument must match.
+#   args_deny_glob  per-argument globs: no single argument may match. Use it
+#                   to carve dangerous options out of an allow rule.
+#   args_in_workspace = true
+#                   the request cwd must be inside a `workspace` root and
+#                   every path-like argument (plain arguments and the value of
+#                   --opt=value) must resolve inside one. `~...` arguments and
+#                   path-shaped short-option clusters (`-f/etc/x`) never
+#                   qualify. With `workspace = []` such rules never match, so
+#                   the commands below that read file contents ask until you
+#                   set a workspace.
+#
+# Add your project roots here so file writes (and the file-reading rules
+# below) inside them auto-allow:
 # workspace = ["~/Code"]
 
 default_tier = "ask"
 workspace = []
 
+# How the broker runs approved commands.
+# [exec]
+# Trusted directories for bare program names, and the PATH children get.
+# The daemon's own PATH is never used. Default: /usr/bin /bin /usr/sbin
+# /sbin /usr/local/bin (+ /opt/homebrew/bin on macOS; System32 on Windows).
+# Add e.g. "~/.cargo/bin" if you want approved `cargo` runs to work. Only
+# list directories the agent cannot write to.
+# path = ["/usr/bin", "/bin", "/usr/local/bin"]
+
+# Metadata only: these print names, sizes and types, never file contents,
+# and have no option that runs another program or writes a file. They are
+# allowed anywhere, so they do reveal which files exist outside the
+# workspace.
 [[rules]]
-name = "read-only basics"
+name = "read-only metadata"
 tier = "allow"
-argv0 = ["ls", "cat", "echo", "pwd", "rg", "grep", "head", "tail", "wc", "which", "file", "stat", "find"]
+argv0 = ["ls", "echo", "pwd", "wc", "which", "stat"]
 
 [[rules]]
-name = "git read-only"
+name = "read file contents inside the workspace"
+tier = "allow"
+argv0 = ["cat", "head", "tail"]
+args_in_workspace = true
+
+[[rules]]
+name = "grep inside the workspace"
+tier = "allow"
+argv0 = ["grep"]
+args_in_workspace = true
+# -R / --dereference-recursive follow symlinks out of the workspace
+# (GNU accepts abbreviations, hence --der*).
+args_deny_glob = ["-R", "-[!-]*R*", "--der*"]
+
+[[rules]]
+name = "ripgrep inside the workspace"
+tier = "allow"
+argv0 = ["rg"]
+args_in_workspace = true
+# --pre runs a command per file; --hostname-bin runs a program;
+# -L / --follow follow symlinks out of the workspace.
+args_deny_glob = ["--pre*", "--hostname-bin*", "-L", "-[!-]*L*", "--follow"]
+
+[[rules]]
+name = "find inside the workspace"
+tier = "allow"
+argv0 = ["find"]
+args_in_workspace = true
+# -exec/-execdir/-ok/-okdir run commands; -delete and -fprint*/-fls write;
+# -L/-follow follow symlinks out; -files0-from reads start points from a file.
+args_deny_glob = ["-exec*", "-ok*", "-delete", "-fprint*", "-fls", "-L", "-follow", "-files0-from*"]
+
+[[rules]]
+name = "file(1) inside the workspace"
+tier = "allow"
+argv0 = ["file"]
+args_in_workspace = true
+# -f / --files-from read more names from a file (which can point anywhere).
+args_deny_glob = ["-f", "-[!-]*f*", "--f*"]
+
+# Exact subcommand forms only: `status*` used to match `statusx`, and
+# `diff*` matched `difftool --extcmd=...`.
+#
+# CAVEAT: git runs programs named in the repository's own configuration
+# (core.fsmonitor, filter drivers, diff textconv / diff.external) even for
+# these commands. An agent that can write .git/config or .gitattributes in a
+# repo can therefore get code execution through these rules. If the agent
+# can write your repos' .git directories, delete the two git allow rules.
+[[rules]]
+name = "git status and listings"
 tier = "allow"
 argv0 = ["git"]
-args_glob = ["status*", "diff*", "log*", "show*", "branch", "branch -v*", "remote -v", "fetch*"]
+args_glob = [
+  "status", "status *",
+  "branch", "branch --list", "branch -v", "branch -vv", "branch -a", "branch -av",
+  "branch -r", "branch --show-current",
+  "remote -v",
+]
+
+[[rules]]
+name = "git history inside the workspace"
+tier = "allow"
+argv0 = ["git"]
+args_glob = ["diff", "diff *", "log", "log *", "show", "show *"]
+args_in_workspace = true
+# --output writes a file (git accepts abbreviations: --ou, --out, ...);
+# -O / --orderfile read a file; --no-index diffs arbitrary files;
+# --ext-diff runs the configured external diff.
+args_deny_glob = ["--o", "--ou*", "--or*", "-O*", "--no-index", "--ext-diff"]
+
+# `git fetch` is not here: it talks to the network, writes .git, and
+# `--upload-pack=<cmd>` runs a command. It asks by default.
 
 [[rules]]
 name = "git push requires strong approval"
 tier = "ask_strong"
 argv0 = ["git"]
-args_glob = ["push*"]
+# Any argument, so `git -C dir push` and `git -c k=v push` are caught too.
+args_any_glob = ["push"]
 
 [[rules]]
 name = "recursive or forced rm requires strong approval"
 tier = "ask_strong"
 argv0 = ["rm"]
-args_glob = ["-r*", "-f*", "*-rf*", "*-fr*", "-R*"]
+# Per argument, so `rm dir -r` (GNU permutes options) and long forms
+# (--recursive, --force, --no-preserve-root, and their abbreviations) count.
+args_any_glob = ["-[rRf]*", "-[!-]*[rRf]*", "--r*", "--f*", "--n*"]
 
 [[rules]]
 name = "package installs"

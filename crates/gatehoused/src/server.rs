@@ -96,7 +96,7 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
             ctx.audit(&digest, &summary, tier, "allowed", &rule);
             send(w, &decision(DecisionStatus::Allowed)).await;
             if execute {
-                run_child(w, &request).await;
+                run_child(w, &ctx.policy, &request).await;
             }
         }
         Tier::Ask | Tier::AskStrong => {
@@ -206,7 +206,7 @@ async fn handle_submit(w: &Writer, ctx: &Arc<Ctx>, request: GateRequest, execute
                 ctx.audit(&digest, &summary, tier, outcome, &via);
                 send(w, &decision(DecisionStatus::Allowed)).await;
                 if execute {
-                    run_child(w, &request).await;
+                    run_child(w, &ctx.policy, &request).await;
                 }
             } else {
                 info!("denied [{short}] {summary}");
@@ -249,27 +249,55 @@ fn approval_audit_label(tier: Tier, envelope: &ApprovalEnvelope) -> (&'static st
     }
 }
 
-/// Environment variables always passed through to children, on top of the
-/// request's explicit allowlist.
-const BASE_ENV: &[&str] = &["PATH", "HOME", "TERM", "LANG", "USER", "SHELL", "TMPDIR"];
+/// Environment variables always passed through to children (from the
+/// daemon's own environment), on top of the request's explicit allowlist.
+/// `PATH` is not among them: children get the policy's trusted exec path.
+const BASE_ENV: &[&str] = &["HOME", "TERM", "LANG", "USER", "SHELL", "TMPDIR"];
 
 /// Broker-executes: the daemon runs the approved argv itself and streams
 /// output back. The agent never gets to run the command in its own context.
-async fn run_child(w: &Writer, request: &GateRequest) {
+///
+/// The program is resolved by [`Policy::resolve_program`]: a bare name only
+/// against the trusted `[exec] path`, never the daemon's `PATH` or the
+/// request cwd; that resolved path is what gets executed.
+async fn run_child(w: &Writer, policy: &gatehouse_proto::Policy, request: &GateRequest) {
     let Operation::Exec { argv, cwd } = &request.op else {
         return;
     };
-    let mut cmd = tokio::process::Command::new(&argv[0]);
+    let Some(program) = argv.first().and_then(|p| policy.resolve_program(p, cwd)) else {
+        send(
+            w,
+            &DaemonMsg::Error {
+                message: format!(
+                    "spawn failed: `{}` not found in the trusted exec path \
+                     (policy [exec] path)",
+                    argv.first().map(String::as_str).unwrap_or("")
+                ),
+            },
+        )
+        .await;
+        send(w, &DaemonMsg::Exit { code: 127 }).await;
+        return;
+    };
+    let mut cmd = tokio::process::Command::new(&program);
+    // Keep the requested argv[0] as the child's argv[0] (busybox-style
+    // multi-call binaries dispatch on it).
+    #[cfg(unix)]
+    cmd.arg0(&argv[0]);
     cmd.args(&argv[1..])
         .current_dir(cwd)
         .env_clear()
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped());
+    if let Ok(path) = std::env::join_paths(policy.exec_path()) {
+        cmd.env("PATH", path);
+    }
     for key in BASE_ENV
         .iter()
         .copied()
         .chain(request.env_allowlist.iter().map(String::as_str))
+        .filter(|k| *k != "PATH")
     {
         if let Ok(val) = std::env::var(key) {
             cmd.env(key, val);
@@ -518,6 +546,80 @@ mod tests {
         let (decision, rule) = last_audit_decision(&audit);
         assert_eq!(decision, "approved");
         assert_eq!(rule, "operator-ctl (unattested)");
+    }
+
+    fn stdout_of(msgs: &[DaemonMsg]) -> String {
+        let b64 = base64::engine::general_purpose::STANDARD;
+        msgs.iter()
+            .filter_map(|m| match m {
+                DaemonMsg::Stdout { b64: d } => Some(b64.decode(d).unwrap()),
+                _ => None,
+            })
+            .map(|b| String::from_utf8(b).unwrap())
+            .collect()
+    }
+
+    fn exit_of(msgs: &[DaemonMsg]) -> Option<i32> {
+        msgs.iter().find_map(|m| match m {
+            DaemonMsg::Exit { code } => Some(*code),
+            _ => None,
+        })
+    }
+
+    #[cfg(unix)]
+    fn script(dir: &std::path::Path, name: &str, body: &str) {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join(name);
+        std::fs::write(&p, format!("#!/bin/sh\n{body}\n")).unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+
+    fn scratch(tag: &str) -> std::path::PathBuf {
+        let d = std::env::temp_dir().join(format!("gh-srv-{tag}-{}", uuid::Uuid::new_v4()));
+        std::fs::create_dir_all(&d).unwrap();
+        d
+    }
+
+    /// The broker executes the trusted-path resolution of a bare name, never
+    /// a same-named file in the requester's cwd, and children get the
+    /// trusted path as PATH rather than the daemon's.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn run_child_executes_the_trusted_program() {
+        let trusted = scratch("trusted");
+        let cwd = scratch("cwd");
+        script(&trusted, "frob", "echo trusted:$PATH");
+        script(&cwd, "frob", "echo pwned");
+        let mut policy: Policy = toml::from_str(
+            r#"
+            [[rules]]
+            name = "frob"
+            tier = "allow"
+            argv0 = ["frob"]
+            "#,
+        )
+        .unwrap();
+        policy.exec.path = vec![trusted.to_string_lossy().into_owned()];
+        let (ctx, _) = crate::test_ctx(policy, Duration::from_millis(100), vec![]);
+        let mut req = exec(&["frob"]);
+        if let Operation::Exec { cwd: c, .. } = &mut req.op {
+            *c = cwd.to_string_lossy().into_owned();
+        }
+        let msgs = submit(&ctx, req, true).await;
+        assert_eq!(
+            stdout_of(&msgs).trim(),
+            format!("trusted:{}", trusted.display())
+        );
+        assert_eq!(exit_of(&msgs), Some(0));
+
+        // `./frob` is not the allow rule's frob: it falls to ask, and times out.
+        let mut req = exec(&["./frob"]);
+        if let Operation::Exec { cwd: c, .. } = &mut req.op {
+            *c = cwd.to_string_lossy().into_owned();
+        }
+        let msgs = submit(&ctx, req, true).await;
+        assert_eq!(statuses(&msgs).last().unwrap().1, DecisionStatus::Denied);
+        assert!(stdout_of(&msgs).is_empty());
     }
 
     /// With a passkey enrolled the ctl path refuses ask-strong, and an
