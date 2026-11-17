@@ -52,6 +52,8 @@ enum Cmd {
     /// Deny a pending request by digest prefix.
     Deny { digest_prefix: String },
     /// Auto-allow an argv glob for a while, e.g. `gate grant "npm install*" --for 1h`.
+    /// The glob must start with a literal program name. Grants lift the `ask`
+    /// tier only; `ask-strong` requests still need their approval.
     Grant {
         argv_glob: String,
         #[arg(long = "for", default_value = "1h")]

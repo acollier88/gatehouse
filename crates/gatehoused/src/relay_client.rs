@@ -272,7 +272,7 @@ fn dispatch(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use std::sync::{Mutex, OnceLock};
     use std::time::{Duration, Instant};
@@ -290,7 +290,7 @@ mod tests {
     /// A credential record shaped like one webauthn-rs would have stored. Only
     /// its presence matters here: `approve_start` refuses to begin a ceremony
     /// with no enrolled phone passkey.
-    fn synthetic_passkey() -> Passkey {
+    pub(crate) fn synthetic_passkey() -> Passkey {
         serde_json::from_value(serde_json::json!({
             "cred": {
                 "cred_id": b64(&[1u8; 16]),

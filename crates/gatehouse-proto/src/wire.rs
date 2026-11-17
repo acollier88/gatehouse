@@ -94,7 +94,9 @@ pub enum CtlMsg {
     Deny {
         digest_prefix: String,
     },
-    /// Session grant: argv glob auto-allowed until the TTL lapses.
+    /// Session grant: argv glob auto-allowed until the TTL lapses. Lifts the
+    /// `ask` tier only, never `ask_strong` or `deny`; the glob must start
+    /// with a literal program name.
     Grant {
         argv_glob: String,
         ttl_secs: u64,

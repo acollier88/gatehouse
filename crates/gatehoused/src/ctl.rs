@@ -42,7 +42,7 @@ pub async fn run(listener: LocalListener, ctx: Arc<Ctx>, started: Instant) {
     }
 }
 
-fn handle(ctx: &Arc<Ctx>, msg: CtlMsg, started: Instant) -> CtlResp {
+pub(crate) fn handle(ctx: &Arc<Ctx>, msg: CtlMsg, started: Instant) -> CtlResp {
     match msg {
         CtlMsg::Pending => CtlResp::Pending {
             entries: ctx.state.pending_snapshot(),
@@ -53,10 +53,20 @@ fn handle(ctx: &Arc<Ctx>, msg: CtlMsg, started: Instant) -> CtlResp {
             argv_glob,
             ttl_secs,
         } => {
-            ctx.state
-                .add_grant(argv_glob.clone(), Duration::from_secs(ttl_secs));
-            CtlResp::Ok {
-                message: format!("granted `{argv_glob}` for {ttl_secs}s"),
+            match ctx
+                .state
+                .add_grant(argv_glob.clone(), Duration::from_secs(ttl_secs))
+            {
+                Ok(()) => {
+                    info!("session grant `{argv_glob}` for {ttl_secs}s (lifts ask only)");
+                    CtlResp::Ok {
+                        message: format!(
+                            "granted `{argv_glob}` for {ttl_secs}s \
+                             (ask-tier only; ask-strong still needs approval)"
+                        ),
+                    }
+                }
+                Err(message) => CtlResp::Error { message },
             }
         }
         CtlMsg::Status => CtlResp::Status {
