@@ -753,7 +753,11 @@ mod tests {
     fn find_exec_and_friends_are_not_allowed() {
         let (p, ws) = ws_policy();
         let t = |argv: &[&str]| p.resolve_x(&exec_in(&ws, argv)).0;
-        assert_eq!(t(&["find", ".", "-name", "*.rs"]), Tier::Allow);
+        // Positive control only where `find` exists in the default trusted
+        // path; on Windows the bare name does not resolve and the rule asks.
+        if cfg!(unix) {
+            assert_eq!(t(&["find", ".", "-name", "*.rs"]), Tier::Allow);
+        }
         for bad in [
             &["find", ".", "-exec", "sh", "-c", "id", ";"][..],
             &["find", ".", "-execdir", "id", ";"],
@@ -773,10 +777,13 @@ mod tests {
         // The git allow rules only exist for decision-only requests, so
         // that is where their option carve-outs have to hold.
         let t = |argv: &[&str]| p.resolve_advisory(&exec_in(&ws, argv)).0;
-        assert_eq!(t(&["git", "status"]), Tier::Allow);
-        assert_eq!(t(&["git", "log", "--oneline", "-5"]), Tier::Allow);
-        assert_eq!(t(&["git", "diff", "HEAD~1", "--", "src"]), Tier::Allow);
-        assert_eq!(t(&["git", "show", "HEAD:src/main.rs"]), Tier::Allow);
+        // Positive controls only where `git` is in the default trusted path.
+        if cfg!(unix) {
+            assert_eq!(t(&["git", "status"]), Tier::Allow);
+            assert_eq!(t(&["git", "log", "--oneline", "-5"]), Tier::Allow);
+            assert_eq!(t(&["git", "diff", "HEAD~1", "--", "src"]), Tier::Allow);
+            assert_eq!(t(&["git", "show", "HEAD:src/main.rs"]), Tier::Allow);
+        }
         for bad in [
             &["git", "fetch", "--upload-pack=touch /tmp/pwned", "origin"][..],
             &[
